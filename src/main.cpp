@@ -1,72 +1,84 @@
-#include <ros/ros.h>
-#include <sensor_msgs/PointCloud2.h>
-#include <pcl_conversions/pcl_conversions.h>
+#include "adapters/livox_converter.hpp"
+
+#include <pcl/filters/crop_box.h>
+#include <pcl/filters/passthrough.h>
+#include <pcl/filters/project_inliers.h>
+#include <pcl/filters/statistical_outlier_removal.h>
+#include <pcl/filters/voxel_grid.h>
+#include <pcl/kdtree/kdtree_flann.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl/sample_consensus/model_types.h>
-#include <pcl/filters/voxel_grid.h>
-#include <pcl/filters/statistical_outlier_removal.h>
-#include <pcl/filters/passthrough.h>
-#include <pcl/filters/project_inliers.h>
-#include <pcl/filters/crop_box.h>
-#include <pcl/kdtree/kdtree_flann.h>
+#include <pcl_conversions/pcl_conversions.h>
+#include <ros/ros.h>
+#include <sensor_msgs/PointCloud2.h>
+
 #include <unordered_set>
 
 // 点云积累类（连续降采样 + ROI过滤 + 膨胀 + 腐蚀 + 平面投影）
 class CloudAccumulator
 {
-public:
-    CloudAccumulator(ros::NodeHandle &nh) : nh_(nh)
-    {
+  public:
+    CloudAccumulator(ros::NodeHandle &nh) : nh_(nh) {
         // 初始化点云指针（原始→降采样→ROI→膨胀→腐蚀→投影）
         raw_accumulated_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
         downsampled_accumulated_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
         roi_filtered_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
         dilated_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
         eroded_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
-        projected_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>); // 新增：投影后点云
+        projected_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);  // 新增：投影后点云
 
         // 订阅/发布器
-        cloud_sub_ = nh_.subscribe("/cloud_registered", 1, &CloudAccumulator::cloudCallback, this);
+        cloud_sub_ = nh_.subscribe("/livox/lidar", 1, &CloudAccumulator::cloudCallback, this);
         accumulated_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/accumulated_cloud", 1);
-        downsampled_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/downsampled_accumulated_cloud", 1);
-        roi_filtered_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/roi_filtered_accumulated_cloud", 1);
-        dilated_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/dilated_accumulated_cloud", 1);
+        downsampled_cloud_pub_ =
+            nh_.advertise<sensor_msgs::PointCloud2>("/downsampled_accumulated_cloud", 1);
+        roi_filtered_pub_ =
+            nh_.advertise<sensor_msgs::PointCloud2>("/roi_filtered_accumulated_cloud", 1);
+        dilated_cloud_pub_ =
+            nh_.advertise<sensor_msgs::PointCloud2>("/dilated_accumulated_cloud", 1);
         eroded_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/eroded_accumulated_cloud", 1);
-        projected_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/projected_accumulated_cloud", 1); // 新增：投影结果发布
+        projected_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
+            "/projected_accumulated_cloud", 1);  // 新增：投影结果发布
 
         // 降采样参数
-        voxel_leaf_size_ = 0.05; // 5cm体素分辨率
+        voxel_leaf_size_    = 0.05;  // 5cm体素分辨率
 
         // ROI区域参数
-        roi_x_min_ = -0.5;
-        roi_x_max_ = 4.5;
-        roi_y_min_ = -7.0;
-        roi_y_max_ = 1.0;
-        roi_z_min_ = 0.0;
-        roi_z_max_ = 3.5;
+        roi_x_min_          = -0.5;
+        roi_x_max_          = 4.5;
+        roi_y_min_          = -7.0;
+        roi_y_max_          = 1.0;
+        roi_z_min_          = 0.0;
+        roi_z_max_          = 3.5;
 
         // 膨胀参数
-        dilation_radius_ = 0.1; // 膨胀半径（米）
-        dilation_steps_ = 6;    // 膨胀步数
+        dilation_radius_    = 0.1;  // 膨胀半径（米）
+        dilation_steps_     = 6;    // 膨胀步数
 
         // 腐蚀参数
-        erosion_radius_ = 0.15;  // 腐蚀搜索半径（米）
-        erosion_min_points_ = 3; // 最小点数阈值
+        erosion_radius_     = 0.15;  // 腐蚀搜索半径（米）
+        erosion_min_points_ = 3;     // 最小点数阈值
 
         // 新增：投影参数（默认投影到Z=0的地面平面）
-        projection_plane_z_ = 0.0; // 投影目标平面的Z坐标（可自定义为其他值，如0.1m）
+        projection_plane_z_ = 0.0;  // 投影目标平面的Z坐标（可自定义为其他值，如0.1m）
     }
 
     // 点云回调函数：接收 → 累加 → 降采样 → ROI过滤 → 膨胀 → 腐蚀 → 投影 → 发布
-    void cloudCallback(const sensor_msgs::PointCloud2ConstPtr &cloud_msg)
-    {
+    // void cloudCallback(const sensor_msgs::PointCloud2ConstPtr &cloud_msg) {
+    void cloudCallback(const livox_ros_driver2::CustomMsg::Ptr &livox_msg) {
         // 1. ROS转PCL点云
         pcl::PointCloud<pcl::PointXYZ>::Ptr input_cloud(new pcl::PointCloud<pcl::PointXYZ>);
-        pcl::fromROSMsg(*cloud_msg, *input_cloud);
+        // pcl::fromROSMsg(*cloud_msg, *input_cloud);
 
-        if (input_cloud->empty())
+        if (!pcl_detection2::adapters::LivoxConverter<pcl::PointXYZ>::convert(livox_msg,
+                                                                              input_cloud, 0))
         {
+            ROS_WARN("转换点云失败");
+            return;
+        }
+
+        if (input_cloud->empty()) {
             ROS_WARN("接收到空点云，跳过积累");
             return;
         }
@@ -100,18 +112,18 @@ public:
         projectPointCloud(dilated_cloud_, projected_cloud_);
 
         // 8. 发布各类点云
-        publishAccumulatedCloud(cloud_msg->header);
-        publishDownsampledCloud(cloud_msg->header);
-        publishROIFilteredCloud(cloud_msg->header);
-        publishDilatedCloud(cloud_msg->header);
-        publishErodedCloud(cloud_msg->header);
-        publishProjectedCloud(cloud_msg->header); // 新增：发布投影后点云
+        publishAccumulatedCloud(livox_msg->header);
+        publishDownsampledCloud(livox_msg->header);
+        publishROIFilteredCloud(livox_msg->header);
+        publishDilatedCloud(livox_msg->header);
+        publishErodedCloud(livox_msg->header);
+        publishProjectedCloud(livox_msg->header);  // 新增：发布投影后点云
     }
 
-private:
+  private:
     // ROI过滤核心函数
-    void filterROI(pcl::PointCloud<pcl::PointXYZ>::Ptr input, pcl::PointCloud<pcl::PointXYZ>::Ptr output)
-    {
+    void filterROI(pcl::PointCloud<pcl::PointXYZ>::Ptr input,
+                   pcl::PointCloud<pcl::PointXYZ>::Ptr output) {
         pcl::PointCloud<pcl::PointXYZ>::Ptr temp_cloud(new pcl::PointCloud<pcl::PointXYZ>);
         /***********template 3**************/
 
@@ -126,20 +138,18 @@ private:
 
     struct VoxelKeyHash
     {
-        std::size_t operator()(const Eigen::Vector3i &key) const
-        {
-            return std::hash<int>()(key[0]) ^ (std::hash<int>()(key[1]) << 1) ^ (std::hash<int>()(key[2]) << 2);
+        std::size_t operator() (const Eigen::Vector3i &key) const {
+            return std::hash<int>()(key[0]) ^ (std::hash<int>()(key[1]) << 1) ^
+                   (std::hash<int>()(key[2]) << 2);
         }
     };
     // 点云膨胀核心函数
     void dilatePointCloud(pcl::PointCloud<pcl::PointXYZ>::Ptr input,
-                          pcl::PointCloud<pcl::PointXYZ>::Ptr output)
-    {
+                          pcl::PointCloud<pcl::PointXYZ>::Ptr output) {
         float resolution = 0.05f;
-        float radius = 0.15f;
+        float radius     = 0.15f;
         output->clear();
-        if (input->empty())
-            return;
+        if (input->empty()) return;
 
         // /***********template 4**************/
         // using VoxelSet = std::unordered_set<Eigen::Vector3i, VoxelKeyHash>;
@@ -199,13 +209,10 @@ private:
         temppc->clear();
         const float deta_round = 3 * M_PI / dilation_steps_;
         const float deta_above = M_PI / dilation_steps_;
-        for (auto &point : input->points)
-        {
-            for (int i = 0; i < dilation_steps_; ++i)
-            {
+        for (auto &point : input->points) {
+            for (int i = 0; i < dilation_steps_; ++i) {
                 float delta = i * deta_round;
-                for (int i = 0; i < dilation_steps_; i++)
-                {
+                for (int i = 0; i < dilation_steps_; i++) {
                     float delta_z = i * deta_above;
                     pcl::PointXYZ dilated_point;
                     dilated_point.x = point.x + dilation_radius_ * cos(delta) * cos(delta_z);
@@ -222,11 +229,10 @@ private:
     }
 
     // 点云腐蚀核心函数
-    void erodePointCloud(pcl::PointCloud<pcl::PointXYZ>::Ptr input, pcl::PointCloud<pcl::PointXYZ>::Ptr output)
-    {
+    void erodePointCloud(pcl::PointCloud<pcl::PointXYZ>::Ptr input,
+                         pcl::PointCloud<pcl::PointXYZ>::Ptr output) {
         output->clear();
-        if (input->empty())
-            return;
+        if (input->empty()) return;
 
         // // 构建KD-Tree：用于快速搜索邻域点
         // pcl::KdTreeFLANN<pcl::PointXYZ> kdtree;
@@ -251,11 +257,10 @@ private:
     }
 
     // 新增：点云平面投影核心函数（默认投影到Z=projection_plane_z_平面）
-    void projectPointCloud(pcl::PointCloud<pcl::PointXYZ>::Ptr input, pcl::PointCloud<pcl::PointXYZ>::Ptr output)
-    {
+    void projectPointCloud(pcl::PointCloud<pcl::PointXYZ>::Ptr input,
+                           pcl::PointCloud<pcl::PointXYZ>::Ptr output) {
         output->clear();
-        if (input->empty())
-            return;
+        if (input->empty()) return;
 
         // // 遍历所有点，将Z坐标强制设为投影平面的Z值（X/Y保持不变）
         // for (const auto &point : *input)
@@ -271,13 +276,13 @@ private:
 
         // /***********************************/
         pcl::ModelCoefficients::Ptr ground(new pcl::ModelCoefficients);
-        ground->values = {0.0, 0.0, 1.0, -0.7}; // [a,b,c,d]
+        ground->values = {0.0, 0.0, 1.0, -0.7};  // [a,b,c,d]
 
         pcl::ProjectInliers<pcl::PointXYZ> proj;
         proj.setModelType(pcl::SACMODEL_PLANE);
         proj.setInputCloud(input);
         proj.setModelCoefficients(ground);
-        proj.setCopyAllData(false); // 仅输出投影后的内点
+        proj.setCopyAllData(false);  // 仅输出投影后的内点
         proj.filter(*output);
     }
 
@@ -285,10 +290,8 @@ private:
     //  void toMsgColor(pcl::PointCloud)
 
     // 发布原始积累点云
-    void publishAccumulatedCloud(const std_msgs::Header &header)
-    {
-        if (raw_accumulated_cloud_->empty())
-            return;
+    void publishAccumulatedCloud(const std_msgs::Header &header) {
+        if (raw_accumulated_cloud_->empty()) return;
         sensor_msgs::PointCloud2 output_msg;
         pcl::toROSMsg(*raw_accumulated_cloud_, output_msg);
         output_msg.header = header;
@@ -296,10 +299,8 @@ private:
     }
 
     // 发布降采样后点云
-    void publishDownsampledCloud(const std_msgs::Header &header)
-    {
-        if (downsampled_accumulated_cloud_->empty())
-            return;
+    void publishDownsampledCloud(const std_msgs::Header &header) {
+        if (downsampled_accumulated_cloud_->empty()) return;
         sensor_msgs::PointCloud2 output_msg;
         pcl::toROSMsg(*downsampled_accumulated_cloud_, output_msg);
         output_msg.header = header;
@@ -307,10 +308,8 @@ private:
     }
 
     // 发布ROI过滤后点云
-    void publishROIFilteredCloud(const std_msgs::Header &header)
-    {
-        if (roi_filtered_cloud_->empty())
-            return;
+    void publishROIFilteredCloud(const std_msgs::Header &header) {
+        if (roi_filtered_cloud_->empty()) return;
         sensor_msgs::PointCloud2 output_msg;
         pcl::toROSMsg(*roi_filtered_cloud_, output_msg);
         output_msg.header = header;
@@ -318,10 +317,8 @@ private:
     }
 
     // 发布膨胀后点云
-    void publishDilatedCloud(const std_msgs::Header &header)
-    {
-        if (dilated_cloud_->empty())
-            return;
+    void publishDilatedCloud(const std_msgs::Header &header) {
+        if (dilated_cloud_->empty()) return;
         sensor_msgs::PointCloud2 output_msg;
         pcl::toROSMsg(*dilated_cloud_, output_msg);
         output_msg.header = header;
@@ -329,10 +326,8 @@ private:
     }
 
     // 发布腐蚀后点云
-    void publishErodedCloud(const std_msgs::Header &header)
-    {
-        if (eroded_cloud_->empty())
-            return;
+    void publishErodedCloud(const std_msgs::Header &header) {
+        if (eroded_cloud_->empty()) return;
         sensor_msgs::PointCloud2 output_msg;
         pcl::toROSMsg(*eroded_cloud_, output_msg);
         output_msg.header = header;
@@ -340,18 +335,17 @@ private:
     }
 
     // 新增：发布投影后点云
-    void publishProjectedCloud(const std_msgs::Header &header)
-    {
-        if (projected_cloud_->empty())
-            return;
+    void publishProjectedCloud(const std_msgs::Header &header) {
+        if (projected_cloud_->empty()) return;
         sensor_msgs::PointCloud2 output_msg;
         pcl::toROSMsg(*projected_cloud_, output_msg);
         output_msg.header = header;
         projected_cloud_pub_.publish(output_msg);
-        ROS_INFO("[发布] 投影点云已发布到 /projected_accumulated_cloud，点数：%zu", projected_cloud_->size());
+        ROS_INFO("[发布] 投影点云已发布到 /projected_accumulated_cloud，点数：%zu",
+                 projected_cloud_->size());
     }
 
-private:
+  private:
     ros::NodeHandle nh_;
     ros::Subscriber cloud_sub_;
     ros::Publisher accumulated_cloud_pub_;
@@ -359,7 +353,7 @@ private:
     ros::Publisher roi_filtered_pub_;
     ros::Publisher dilated_cloud_pub_;
     ros::Publisher eroded_cloud_pub_;
-    ros::Publisher projected_cloud_pub_; // 新增：投影点云发布器
+    ros::Publisher projected_cloud_pub_;  // 新增：投影点云发布器
 
     // 点云容器（六级处理：原始 → 降采样 → ROI过滤 → 膨胀 → 腐蚀 → 投影）
     pcl::PointCloud<pcl::PointXYZ>::Ptr raw_accumulated_cloud_;
@@ -367,7 +361,7 @@ private:
     pcl::PointCloud<pcl::PointXYZ>::Ptr roi_filtered_cloud_;
     pcl::PointCloud<pcl::PointXYZ>::Ptr dilated_cloud_;
     pcl::PointCloud<pcl::PointXYZ>::Ptr eroded_cloud_;
-    pcl::PointCloud<pcl::PointXYZ>::Ptr projected_cloud_; // 新增：投影后点云
+    pcl::PointCloud<pcl::PointXYZ>::Ptr projected_cloud_;  // 新增：投影后点云
 
     // 参数
     double voxel_leaf_size_;
@@ -382,12 +376,11 @@ private:
     double erosion_radius_;
     int erosion_min_points_;
     // 新增：投影参数
-    double projection_plane_z_; // 投影平面的Z坐标（默认Z=0，地面平面）
+    double projection_plane_z_;  // 投影平面的Z坐标（默认Z=0，地面平面）
 };
 
 // 主函数
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
     setlocale(LC_ALL, "");
     ros::init(argc, argv, "cloud_template_node");
     ros::NodeHandle nh;
