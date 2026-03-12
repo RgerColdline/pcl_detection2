@@ -141,59 +141,84 @@ private:
         if (input->empty())
             return;
 
-        /***********template 4**************/
-        using VoxelSet = std::unordered_set<Eigen::Vector3i, VoxelKeyHash>;
-        VoxelSet occupied_voxels;
+        // /***********template 4**************/
+        // using VoxelSet = std::unordered_set<Eigen::Vector3i, VoxelKeyHash>;
+        // VoxelSet occupied_voxels;
 
-        // 1. 体素化：将点映射到网格索引
-        for (const auto &pt : input->points)
+        // // 1. 体素化：将点映射到网格索引
+        // for (const auto &pt : input->points)
+        // {
+        //     Eigen::Vector3i idx(
+        //         static_cast<int>(std::floor(pt.x / resolution)),
+        //         static_cast<int>(std::floor(pt.y / resolution)),
+        //         static_cast<int>(std::floor(pt.z / resolution)));
+        //     occupied_voxels.insert(idx);
+        // }
+
+        // // 2. 球形膨胀：遍历邻域并校验欧氏距离
+        // VoxelSet dilated_voxels;
+        // int voxel_range = static_cast<int>(std::ceil(radius / resolution));
+        // float radius_sq = radius * radius;
+
+        // for (const auto &voxel : occupied_voxels)
+        // {
+        //     for (int dx = -voxel_range; dx <= voxel_range; ++dx)
+        //     {
+        //         for (int dy = -voxel_range; dy <= voxel_range; ++dy)
+        //         {
+        //             for (int dz = -voxel_range; dz <= voxel_range; ++dz)
+        //             {
+        //                 // 球形校验：体素中心距离 <= 膨胀半径
+        //                 float dist_sq = (dx * resolution) * (dx * resolution) +
+        //                                 (dy * resolution) * (dy * resolution) +
+        //                                 (dz * resolution) * (dz * resolution);
+
+        //                 if (dist_sq <= radius_sq)
+        //                 {
+        //                     dilated_voxels.insert(voxel + Eigen::Vector3i(dx, dy, dz));
+        //                 }
+        //             }
+        //         }
+        //     }
+        // }
+
+        // // 3. 重构：将体素索引转回点云坐标 (体素中心)
+        // output->reserve(dilated_voxels.size());
+        // float half_res = resolution * 0.5f;
+        // for (const auto &voxel : dilated_voxels)
+        // {
+        //     pcl::PointXYZ p;
+        //     p.x = (voxel[0] + 0.5f) * resolution;
+        //     p.y = (voxel[1] + 0.5f) * resolution;
+        //     p.z = (voxel[2] + 0.5f) * resolution;
+        //     output->push_back(p);
+        // }
+        // /***********************************/
+
+        static pcl::PointCloud<pcl::PointXYZ>::Ptr temppc(new pcl::PointCloud<pcl::PointXYZ>);
+        temppc->clear();
+        const float deta_round = 3 * M_PI / dilation_steps_;
+        const float deta_above = M_PI / dilation_steps_;
+        for (auto &point : input->points)
         {
-            Eigen::Vector3i idx(
-                static_cast<int>(std::floor(pt.x / resolution)),
-                static_cast<int>(std::floor(pt.y / resolution)),
-                static_cast<int>(std::floor(pt.z / resolution)));
-            occupied_voxels.insert(idx);
-        }
-
-        // 2. 球形膨胀：遍历邻域并校验欧氏距离
-        VoxelSet dilated_voxels;
-        int voxel_range = static_cast<int>(std::ceil(radius / resolution));
-        float radius_sq = radius * radius;
-
-        for (const auto &voxel : occupied_voxels)
-        {
-            for (int dx = -voxel_range; dx <= voxel_range; ++dx)
+            for (int i = 0; i < dilation_steps_; ++i)
             {
-                for (int dy = -voxel_range; dy <= voxel_range; ++dy)
+                float delta = i * deta_round;
+                for (int i = 0; i < dilation_steps_; i++)
                 {
-                    for (int dz = -voxel_range; dz <= voxel_range; ++dz)
-                    {
-                        // 球形校验：体素中心距离 <= 膨胀半径
-                        float dist_sq = (dx * resolution) * (dx * resolution) +
-                                        (dy * resolution) * (dy * resolution) +
-                                        (dz * resolution) * (dz * resolution);
-
-                        if (dist_sq <= radius_sq)
-                        {
-                            dilated_voxels.insert(voxel + Eigen::Vector3i(dx, dy, dz));
-                        }
-                    }
+                    float delta_z = i * deta_above;
+                    pcl::PointXYZ dilated_point;
+                    dilated_point.x = point.x + dilation_radius_ * cos(delta) * cos(delta_z);
+                    dilated_point.y = point.y + dilation_radius_ * sin(delta) * cos(delta_z);
+                    dilated_point.z = point.z + dilation_radius_ * sin(delta_z);
+                    temppc->push_back(dilated_point);
                 }
             }
         }
-
-        // 3. 重构：将体素索引转回点云坐标 (体素中心)
-        output->reserve(dilated_voxels.size());
-        float half_res = resolution * 0.5f;
-        for (const auto &voxel : dilated_voxels)
-        {
-            pcl::PointXYZ p;
-            p.x = (voxel[0] + 0.5f) * resolution;
-            p.y = (voxel[1] + 0.5f) * resolution;
-            p.z = (voxel[2] + 0.5f) * resolution;
-            output->push_back(p);
-        }
-        /***********************************/
+        pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
+        voxel_filter.setInputCloud(temppc);
+        voxel_filter.setLeafSize(voxel_leaf_size_, voxel_leaf_size_, voxel_leaf_size_);
+        voxel_filter.filter(*output);
     }
 
     // 点云腐蚀核心函数
@@ -256,8 +281,8 @@ private:
         proj.filter(*output);
     }
 
-    //发布带颜色点云工具函数
-    // void toMsgColor(pcl::PointCloud)
+    // 发布带颜色点云工具函数
+    //  void toMsgColor(pcl::PointCloud)
 
     // 发布原始积累点云
     void publishAccumulatedCloud(const std_msgs::Header &header)
