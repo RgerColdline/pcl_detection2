@@ -60,7 +60,7 @@ class CloudAccumulator
 
         // 膨胀参数
         dilation_radius_    = 0.25;  // 膨胀半径（米）
-        dilation_steps_     = 6;     // 膨胀步数
+        dilation_steps_     = 12;    // 膨胀步数
 
         // 腐蚀参数
         erosion_radius_     = 0.15;  // 腐蚀搜索半径（米）
@@ -157,8 +157,8 @@ class CloudAccumulator
     // 点云膨胀核心函数
     void dilatePointCloud(pcl::PointCloud<pcl::PointXYZ>::Ptr input,
                           pcl::PointCloud<pcl::PointXYZ>::Ptr output) {
-        float resolution = 0.05f;
-        float radius     = 0.15f;
+        // float resolution = 0.05f;
+        // float radius     = 0.15f;
         output->clear();
         if (input->empty()) return;
 
