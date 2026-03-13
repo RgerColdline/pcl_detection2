@@ -59,8 +59,8 @@ class CloudAccumulator
         roi_z_max_          = 3.5;
 
         // 膨胀参数
-        dilation_radius_    = 0.1;  // 膨胀半径（米）
-        dilation_steps_     = 6;    // 膨胀步数
+        dilation_radius_    = 0.25;  // 膨胀半径（米）
+        dilation_steps_     = 6;     // 膨胀步数
 
         // 腐蚀参数
         erosion_radius_     = 0.15;  // 腐蚀搜索半径（米）
