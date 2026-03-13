@@ -1,4 +1,5 @@
 #include "adapters/livox_converter.hpp"
+#include "adapters/pc_tf_matrix.hpp"
 
 #include <pcl/filters/crop_box.h>
 #include <pcl/filters/passthrough.h>
@@ -21,6 +22,8 @@ class CloudAccumulator
   public:
     CloudAccumulator(ros::NodeHandle &nh) : nh_(nh) {
         // 初始化点云指针（原始→降采样→ROI→膨胀→腐蚀→投影）
+        raw_livox_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+        tf_livox_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
         raw_accumulated_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
         downsampled_accumulated_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
         roi_filtered_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
@@ -30,6 +33,9 @@ class CloudAccumulator
 
         // 订阅/发布器
         cloud_sub_ = nh_.subscribe("/livox/lidar", 1, &CloudAccumulator::cloudCallback, this);
+        odometry_sub_ =
+            nh_.subscribe("/mavros/local_position/pose", 1,
+                          &pcl_detection2::adapters::PcTfMatrix::odometry_cb, &tf_adapter_);
         accumulated_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/accumulated_cloud", 1);
         downsampled_cloud_pub_ =
             nh_.advertise<sensor_msgs::PointCloud2>("/downsampled_accumulated_cloud", 1);
@@ -68,25 +74,30 @@ class CloudAccumulator
     // void cloudCallback(const sensor_msgs::PointCloud2ConstPtr &cloud_msg) {
     void cloudCallback(const livox_ros_driver2::CustomMsg::Ptr &livox_msg) {
         // 1. ROS转PCL点云
-        pcl::PointCloud<pcl::PointXYZ>::Ptr input_cloud(new pcl::PointCloud<pcl::PointXYZ>);
-        // pcl::fromROSMsg(*cloud_msg, *input_cloud);
+        // pcl::fromROSMsg(*cloud_msg, *raw_livox_cloud_);
 
         if (!pcl_detection2::adapters::LivoxConverter<pcl::PointXYZ>::convert(livox_msg,
-                                                                              input_cloud, 0))
+                                                                              raw_livox_cloud_, 0))
         {
             ROS_WARN("转换点云失败");
             return;
         }
 
-        if (input_cloud->empty()) {
+        if (raw_livox_cloud_->empty()) {
             ROS_WARN("接收到空点云，跳过积累");
             return;
         }
-        ROS_INFO("[积累] 接收新点云：%zu 个点", input_cloud->size());
+        ROS_INFO("[积累] 接收新点云：%zu 个点", raw_livox_cloud_->size());
 
+        Eigen::Affine3f transform;
+        if (!tf_adapter_.get_transform(transform)) {
+            ROS_WARN_THROTTLE(1.0, "里程计无消息，等待中");
+            return;
+        }
+        pcl::transformPointCloud(*raw_livox_cloud_, *tf_livox_cloud_, transform);
         /***********template 1***************/
 
-        *raw_accumulated_cloud_ = *downsampled_accumulated_cloud_ + *input_cloud;
+        *raw_accumulated_cloud_ = *downsampled_accumulated_cloud_ + *tf_livox_cloud_;
 
         /***********************************/
 
@@ -348,6 +359,7 @@ class CloudAccumulator
   private:
     ros::NodeHandle nh_;
     ros::Subscriber cloud_sub_;
+    ros::Subscriber odometry_sub_;
     ros::Publisher accumulated_cloud_pub_;
     ros::Publisher downsampled_cloud_pub_;
     ros::Publisher roi_filtered_pub_;
@@ -355,7 +367,11 @@ class CloudAccumulator
     ros::Publisher eroded_cloud_pub_;
     ros::Publisher projected_cloud_pub_;  // 新增：投影点云发布器
 
+    pcl_detection2::adapters::PcTfMatrix tf_adapter_;
+
     // 点云容器（六级处理：原始 → 降采样 → ROI过滤 → 膨胀 → 腐蚀 → 投影）
+    pcl::PointCloud<pcl::PointXYZ>::Ptr raw_livox_cloud_;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr tf_livox_cloud_;
     pcl::PointCloud<pcl::PointXYZ>::Ptr raw_accumulated_cloud_;
     pcl::PointCloud<pcl::PointXYZ>::Ptr downsampled_accumulated_cloud_;
     pcl::PointCloud<pcl::PointXYZ>::Ptr roi_filtered_cloud_;
