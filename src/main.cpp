@@ -1,5 +1,6 @@
 #include "adapters/livox_converter.hpp"
 #include "adapters/pc_tf_matrix.hpp"
+#include "core/register.hpp"
 
 #include <pcl/filters/crop_box.h>
 #include <pcl/filters/passthrough.h>
@@ -46,6 +47,10 @@ class CloudAccumulator
         eroded_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/eroded_accumulated_cloud", 1);
         projected_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
             "/projected_accumulated_cloud", 1);  // 新增：投影结果发布
+
+        // 内部模块初始化
+        register_ = std::make_unique<pcl_detection2::core::Register>(1.0f, 0.1f, 0.01f, 30,
+                                                                     Eigen::Matrix4f::Identity());
 
         // 启用参数
         nh_.setParam("/pcl_enable", false);
@@ -103,16 +108,19 @@ class CloudAccumulator
             return;
         }
         pcl::transformPointCloud(*raw_livox_cloud_, *tf_livox_cloud_, transform);
-        /***********template 1***************/
 
-        *raw_accumulated_cloud_ = *downsampled_accumulated_cloud_ + *tf_livox_cloud_;
+        pcl::transformPointCloud(
+            *downsampled_accumulated_cloud_, *register_map_cloud_,
+            register_->registerSourceToTarget(downsampled_accumulated_cloud_, tf_livox_cloud_));
 
-        /***********************************/
+        // *raw_accumulated_cloud_ = *downsampled_accumulated_cloud_ + *tf_livox_cloud_;
+        *register_map_cloud_ += *tf_livox_cloud_;
 
         /***********template 2**************/
 
         pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
-        voxel_filter.setInputCloud(raw_accumulated_cloud_);
+        // voxel_filter.setInputCloud(raw_accumulated_cloud_);
+        voxel_filter.setInputCloud(register_map_cloud_);
         voxel_filter.setLeafSize(voxel_leaf_size_, voxel_leaf_size_, voxel_leaf_size_);
         voxel_filter.filter(*downsampled_accumulated_cloud_);
 
@@ -376,10 +384,12 @@ class CloudAccumulator
     ros::Publisher projected_cloud_pub_;  // 新增：投影点云发布器
 
     pcl_detection2::adapters::PcTfMatrix tf_adapter_;
+    std::unique_ptr<pcl_detection2::core::Register> register_;
 
     // 点云容器（六级处理：原始 → 降采样 → ROI过滤 → 膨胀 → 腐蚀 → 投影）
     pcl::PointCloud<pcl::PointXYZ>::Ptr raw_livox_cloud_;
     pcl::PointCloud<pcl::PointXYZ>::Ptr tf_livox_cloud_;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr register_map_cloud_;
     pcl::PointCloud<pcl::PointXYZ>::Ptr raw_accumulated_cloud_;
     pcl::PointCloud<pcl::PointXYZ>::Ptr downsampled_accumulated_cloud_;
     pcl::PointCloud<pcl::PointXYZ>::Ptr roi_filtered_cloud_;
