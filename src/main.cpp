@@ -78,7 +78,10 @@ class CloudAccumulator
         // 1. ROS转PCL点云
         // pcl::fromROSMsg(*cloud_msg, *raw_livox_cloud_);
         if (nh_.getParam("/pcl_enable", pcl_enable_)) {
-            if (!pcl_enable_) return;
+            if (!pcl_enable_) {
+                ROS_INFO_THROTTLE(1,"等待pcl启动中");
+                return;
+            }
         }
 
         if (!pcl_detection2::adapters::LivoxConverter<pcl::PointXYZ>::convert(livox_msg,
