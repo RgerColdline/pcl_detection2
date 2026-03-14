@@ -47,6 +47,8 @@ class CloudAccumulator
         projected_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
             "/projected_accumulated_cloud", 1);  // 新增：投影结果发布
 
+        // 启用参数
+        nh_.setParam("/pcl_enable", false);
         // 降采样参数
         voxel_leaf_size_    = 0.05;  // 5cm体素分辨率
 
@@ -75,6 +77,9 @@ class CloudAccumulator
     void cloudCallback(const livox_ros_driver2::CustomMsg::Ptr &livox_msg) {
         // 1. ROS转PCL点云
         // pcl::fromROSMsg(*cloud_msg, *raw_livox_cloud_);
+        if (nh_.getParam("/pcl_enable", pcl_enable_)) {
+            if (!pcl_enable_) return;
+        }
 
         if (!pcl_detection2::adapters::LivoxConverter<pcl::PointXYZ>::convert(livox_msg,
                                                                               raw_livox_cloud_, 0))
@@ -380,6 +385,9 @@ class CloudAccumulator
     pcl::PointCloud<pcl::PointXYZ>::Ptr projected_cloud_;  // 新增：投影后点云
 
     // 参数
+    // 启用参数
+    bool pcl_enable_;
+    // 降采样参数
     double voxel_leaf_size_;
     // ROI参数
     double roi_x_min_, roi_x_max_;
