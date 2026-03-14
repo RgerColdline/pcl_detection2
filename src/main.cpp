@@ -79,7 +79,7 @@ class CloudAccumulator
         // pcl::fromROSMsg(*cloud_msg, *raw_livox_cloud_);
         if (nh_.getParam("/pcl_enable", pcl_enable_)) {
             if (!pcl_enable_) {
-                ROS_INFO_THROTTLE(1,"等待pcl启动中");
+                ROS_INFO_THROTTLE(1, "等待pcl启动中");
                 return;
             }
         }
@@ -271,7 +271,7 @@ class CloudAccumulator
         pcl::StatisticalOutlierRemoval<pcl::PointXYZ> sorfilter;
         sorfilter.setInputCloud(input);
         sorfilter.setMeanK(8);
-        sorfilter.setStddevMulThresh(1.0);
+        sorfilter.setStddevMulThresh(0.7);
         sorfilter.filter(*output);
     }
 
