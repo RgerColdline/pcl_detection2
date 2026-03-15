@@ -1,4 +1,4 @@
-initial_enable: true
+initial_enable: false
 
 voxel:
   leaf_size: 0.05
