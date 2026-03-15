@@ -51,7 +51,7 @@ class CloudAccumulator
             "/projected_accumulated_cloud", 1);  // 新增：投影结果发布
 
         // 内部模块初始化
-        register_ = std::make_unique<pcl_detection2::core::Register>(0.5f, 50, 1e-8f, 0.01f,
+        register_ = std::make_unique<pcl_detection2::core::Register>(0.5f, 50, 1e-8f, 0.001f,
                                                                      Eigen::Matrix4f::Identity());
 
         // 启用参数
