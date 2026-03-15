@@ -13,7 +13,7 @@ roi:
   x_min: -0.5
   x_max: 4.5
   y_min: -7.0
-  y_max: -1.0
+  y_max: 1.0
   z_min: 0.3
   z_max: 2.0
 
@@ -22,8 +22,8 @@ dilation:
   steps: 12
 
 erosion:
-  mean_k: 5
-  thresh: 0.5
+  mean_k: 8
+  thresh: 0.7
 
 projection:
   plane_z: 0.7
