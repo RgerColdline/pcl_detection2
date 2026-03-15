@@ -13,4 +13,4 @@ WORKSPACE="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
 . "$WORKSPACE/devel/setup.${SHELL##*/}"
 
 ## 启动 launch 文件
-roslaunch pcl_detection2 pcl_detection.launch
+roslaunch pcl_detection2 pcl_detection2.launch

@@ -1,5 +1,5 @@
 <launch>
     <node pkg="pcl_detection2" type="pcl_detection2_node" name="main" output="screen">
-        <!-- <rosparam command="load" file="$(find pcl_detection)/config/sample_config.yaml" /> -->
+        <rosparam command="load" file="$(find pcl_detection2)/config/pcl_detection2.yaml" />
     </node>
 </launch>

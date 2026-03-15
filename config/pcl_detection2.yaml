@@ -1,0 +1,29 @@
+initial_enable: true
+
+voxel:
+  leaf_size: 0.05
+
+register:
+  max_correspondence_distance: 0.5
+  max_iter: 50
+  transformation_epsilon: 1e-8
+  euclidean_fitness_epsilon: 0.001
+
+roi:
+  x_min: -0.5
+  x_max: 4.5
+  y_min: -7.0
+  y_max: -1.0
+  z_min: 0.3
+  z_max: 2.0
+
+dilation:
+  radius: 0.25
+  steps: 12
+
+erosion:
+  mean_k: 5
+  thresh: 0.5
+
+projection:
+  plane_z: 0.7

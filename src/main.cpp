@@ -21,7 +21,7 @@
 class CloudAccumulator
 {
   public:
-    CloudAccumulator(ros::NodeHandle &nh) : nh_(nh) {
+    CloudAccumulator(ros::NodeHandle &nh, ros::NodeHandle &pnh) : nh_(nh), pnh_(pnh) {
         // 初始化点云指针（原始→降采样→ROI→膨胀→腐蚀→投影）
         raw_livox_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
         downsampled_livox_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
@@ -50,33 +50,44 @@ class CloudAccumulator
         projected_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
             "/projected_accumulated_cloud", 1);  // 新增：投影结果发布
 
-        // 内部模块初始化
-        register_ = std::make_unique<pcl_detection2::core::Register>(0.5f, 50, 1e-8f, 0.001f,
-                                                                     Eigen::Matrix4f::Identity());
-
         // 启用参数
-        nh_.setParam("/pcl_enable", false);
+        pnh_.param("initial_enable", pcl_enable_, false);
+        nh_.setParam("/pcl_enable", pcl_enable_);
+
         // 降采样参数
-        voxel_leaf_size_    = 0.05;  // 5cm体素分辨率
+        pnh_.param("voxel/leaf_size", voxel_leaf_size_, 0.05);
+
+        // 配准参数
+        pnh_.param("register/max_correspondence_distance", register_max_correspondence_distance_,
+                   0.5f);
+        pnh_.param("register/max_iter", register_max_iter_, 50);
+        pnh_.param("register/transformation_epsilon", register_transformation_epsilon_, 1e-8f);
+        pnh_.param("register/euclidean_fitness_epsilon", register_euclidean_fitness_epsilon_,
+                   0.001f);
 
         // ROI区域参数
-        roi_x_min_          = -0.5;
-        roi_x_max_          = 4.5;
-        roi_y_min_          = -7.0;
-        roi_y_max_          = 1.0;
-        roi_z_min_          = 0.3;
-        roi_z_max_          = 2;
+        pnh_.param("roi/x_min", roi_x_min_, -0.5);
+        pnh_.param("roi/x_max", roi_x_max_, 4.5);
+        pnh_.param("roi/y_min", roi_y_min_, -7.0);
+        pnh_.param("roi/y_max", roi_y_max_, 1.0);
+        pnh_.param("roi/z_min", roi_z_min_, 0.3);
+        pnh_.param("roi/z_max", roi_z_max_, 2.0);
 
         // 膨胀参数
-        dilation_radius_    = 0.25;  // 膨胀半径（米）
-        dilation_steps_     = 12;    // 膨胀步数
+        pnh_.param("dilation/radius", dilation_radius_, 0.25);
+        pnh_.param("dilation/steps", dilation_steps_, 12);
 
         // 腐蚀参数
-        erosion_radius_     = 0.15;  // 腐蚀搜索半径（米）
-        erosion_min_points_ = 3;     // 最小点数阈值
+        pnh_.param("erosion/mean_k", erosion_mean_k_, 5);
+        pnh_.param("erosion/thresh", erosion_thresh_, 0.5);
 
-        // 新增：投影参数（默认投影到Z=0的地面平面）
-        projection_plane_z_ = 0.0;  // 投影目标平面的Z坐标（可自定义为其他值，如0.1m）
+        // 投影参数（默认投影到Z=0的地面平面）
+        pnh_.param("projection/plane_z", projection_plane_z_, 0.7f);
+
+        // 内部模块初始化
+        register_ = std::make_unique<pcl_detection2::core::Register>(
+            register_max_correspondence_distance_, register_max_iter_,
+            register_transformation_epsilon_, register_euclidean_fitness_epsilon_);
     }
 
     // 点云回调函数：接收 → 累加 → 降采样 → ROI过滤 → 膨胀 → 腐蚀 → 投影 → 发布
@@ -288,8 +299,8 @@ class CloudAccumulator
 
         pcl::StatisticalOutlierRemoval<pcl::PointXYZ> sorfilter;
         sorfilter.setInputCloud(input);
-        sorfilter.setMeanK(5);
-        sorfilter.setStddevMulThresh(0.5);
+        sorfilter.setMeanK(erosion_mean_k_);
+        sorfilter.setStddevMulThresh(erosion_thresh_);
         sorfilter.filter(*output);
     }
 
@@ -313,7 +324,7 @@ class CloudAccumulator
 
         // /***********************************/
         pcl::ModelCoefficients::Ptr ground(new pcl::ModelCoefficients);
-        ground->values = {0.0, 0.0, 1.0, -0.7};  // [a,b,c,d]
+        ground->values = {0.0, 0.0, 1.0, -projection_plane_z_};  // [a,b,c,d]
 
         pcl::ProjectInliers<pcl::PointXYZ> proj;
         proj.setModelType(pcl::SACMODEL_PLANE);
@@ -384,6 +395,7 @@ class CloudAccumulator
 
   private:
     ros::NodeHandle nh_;
+    ros::NodeHandle pnh_;
     ros::Subscriber cloud_sub_;
     ros::Subscriber odometry_sub_;
     ros::Publisher accumulated_cloud_pub_;
@@ -413,6 +425,11 @@ class CloudAccumulator
     bool pcl_enable_;
     // 降采样参数
     double voxel_leaf_size_;
+    // 配准参数
+    float register_max_correspondence_distance_;
+    int register_max_iter_;
+    float register_transformation_epsilon_;
+    float register_euclidean_fitness_epsilon_;
     // ROI参数
     double roi_x_min_, roi_x_max_;
     double roi_y_min_, roi_y_max_;
@@ -421,19 +438,20 @@ class CloudAccumulator
     double dilation_radius_;
     int dilation_steps_;
     // 腐蚀参数
-    double erosion_radius_;
-    int erosion_min_points_;
+    int erosion_mean_k_;
+    double erosion_thresh_;
     // 新增：投影参数
-    double projection_plane_z_;  // 投影平面的Z坐标（默认Z=0，地面平面）
+    float projection_plane_z_;  // 投影平面的Z坐标（默认Z=0，地面平面）
 };
 
 // 主函数
 int main(int argc, char **argv) {
     setlocale(LC_ALL, "");
     ros::init(argc, argv, "cloud_template_node");
+    ros::NodeHandle pnh("~");
     ros::NodeHandle nh;
 
-    CloudAccumulator accumulator(nh);
+    CloudAccumulator accumulator(nh, pnh);
     ros::spin();
 
     return 0;
