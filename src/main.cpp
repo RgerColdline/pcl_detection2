@@ -24,7 +24,9 @@ class CloudAccumulator
     CloudAccumulator(ros::NodeHandle &nh) : nh_(nh) {
         // 初始化点云指针（原始→降采样→ROI→膨胀→腐蚀→投影）
         raw_livox_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+        downsampled_livox_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
         tf_livox_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+        register_map_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
         raw_accumulated_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
         downsampled_accumulated_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
         roi_filtered_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
@@ -49,7 +51,7 @@ class CloudAccumulator
             "/projected_accumulated_cloud", 1);  // 新增：投影结果发布
 
         // 内部模块初始化
-        register_ = std::make_unique<pcl_detection2::core::Register>(1.0f, 0.1f, 0.01f, 30,
+        register_ = std::make_unique<pcl_detection2::core::Register>(0.5f, 50, 1e-8f, 0.01f,
                                                                      Eigen::Matrix4f::Identity());
 
         // 启用参数
@@ -62,8 +64,8 @@ class CloudAccumulator
         roi_x_max_          = 4.5;
         roi_y_min_          = -7.0;
         roi_y_max_          = 1.0;
-        roi_z_min_          = 0.0;
-        roi_z_max_          = 3.5;
+        roi_z_min_          = 0.3;
+        roi_z_max_          = 2;
 
         // 膨胀参数
         dilation_radius_    = 0.25;  // 膨胀半径（米）
@@ -102,26 +104,34 @@ class CloudAccumulator
         }
         ROS_INFO("[积累] 接收新点云：%zu 个点", raw_livox_cloud_->size());
 
+        pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
+        voxel_filter.setInputCloud(raw_livox_cloud_);
+        voxel_filter.setLeafSize(voxel_leaf_size_, voxel_leaf_size_, voxel_leaf_size_);
+        voxel_filter.filter(*downsampled_livox_cloud_);
+
         Eigen::Affine3f transform;
         if (!tf_adapter_.get_transform(transform)) {
             ROS_WARN_THROTTLE(1.0, "里程计无消息，等待中");
             return;
         }
-        pcl::transformPointCloud(*raw_livox_cloud_, *tf_livox_cloud_, transform);
+        pcl::transformPointCloud(*downsampled_livox_cloud_, *tf_livox_cloud_, transform);
 
-        pcl::transformPointCloud(
-            *downsampled_accumulated_cloud_, *register_map_cloud_,
-            register_->registerSourceToTarget(downsampled_accumulated_cloud_, tf_livox_cloud_));
+        if (downsampled_accumulated_cloud_->empty()) {
+            ROS_WARN("首次点云，跳过配准");
+        }
+        else {
+            pcl::transformPointCloud(
+                *downsampled_accumulated_cloud_, *register_map_cloud_,
+                register_->registerSourceToTarget(downsampled_accumulated_cloud_, tf_livox_cloud_));
+        }
 
         // *raw_accumulated_cloud_ = *downsampled_accumulated_cloud_ + *tf_livox_cloud_;
         *register_map_cloud_ += *tf_livox_cloud_;
 
         /***********template 2**************/
 
-        pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
         // voxel_filter.setInputCloud(raw_accumulated_cloud_);
         voxel_filter.setInputCloud(register_map_cloud_);
-        voxel_filter.setLeafSize(voxel_leaf_size_, voxel_leaf_size_, voxel_leaf_size_);
         voxel_filter.filter(*downsampled_accumulated_cloud_);
 
         /***********************************/
@@ -278,8 +288,8 @@ class CloudAccumulator
 
         pcl::StatisticalOutlierRemoval<pcl::PointXYZ> sorfilter;
         sorfilter.setInputCloud(input);
-        sorfilter.setMeanK(8);
-        sorfilter.setStddevMulThresh(0.7);
+        sorfilter.setMeanK(5);
+        sorfilter.setStddevMulThresh(0.5);
         sorfilter.filter(*output);
     }
 
@@ -388,6 +398,7 @@ class CloudAccumulator
 
     // 点云容器（六级处理：原始 → 降采样 → ROI过滤 → 膨胀 → 腐蚀 → 投影）
     pcl::PointCloud<pcl::PointXYZ>::Ptr raw_livox_cloud_;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr downsampled_livox_cloud_;
     pcl::PointCloud<pcl::PointXYZ>::Ptr tf_livox_cloud_;
     pcl::PointCloud<pcl::PointXYZ>::Ptr register_map_cloud_;
     pcl::PointCloud<pcl::PointXYZ>::Ptr raw_accumulated_cloud_;

@@ -2,7 +2,7 @@
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
-#include <pcl/registration/ndt.h>
+#include <pcl/registration/icp.h>
 #include <ros/ros.h>
 
 #include <Eigen/Dense>
@@ -14,15 +14,32 @@ namespace core
 class Register
 {
   public:
-    Register(float ndt_resolution = 1.0f, float step_size = 0.1f, float trans_eps = 0.01f,
-             int max_iter = 30, Eigen::Matrix4f last_transform = Eigen::Matrix4f::Identity())
-        : ndt_resolution_(ndt_resolution), step_size_(step_size), trans_eps_(trans_eps),
-          max_iter_(max_iter), last_transform_(last_transform) {
-        // 初始化NDT
-        ndt_.setResolution(ndt_resolution_);
-        ndt_.setStepSize(step_size_);
-        ndt_.setTransformationEpsilon(trans_eps_);
-        ndt_.setMaximumIterations(max_iter_);
+    /**
+     * @brief 配准构造
+     * @param max_correspondence_distance 体素分辨率
+     * @param max_iter 迭代次数
+     * @param transformation_epsilon 不知道
+     * @param euclidean_fitness_epsilon 收敛阈值
+     * @param last_transform 初矩阵
+     */
+    Register(float max_correspondence_distance = 0.5f,  // ICP specific param
+             int max_iter                      = 50,    // ICP specific param
+             float transformation_epsilon      = 1e-8,  // ICP specific param
+             float euclidean_fitness_epsilon   = 0.01,  // ICP specific param
+             Eigen::Matrix4f last_transform    = Eigen::Matrix4f::Identity())
+        : max_correspondence_distance_(max_correspondence_distance), max_iter_(max_iter),
+          transformation_epsilon_(transformation_epsilon),
+          euclidean_fitness_epsilon_(euclidean_fitness_epsilon), last_transform_(last_transform) {
+
+        // Initialize ICP
+        icp_.setMaxCorrespondenceDistance(
+            max_correspondence_distance_);     // Maximum distance for a correspondence to be valid
+        icp_.setMaximumIterations(max_iter_);  // Maximum number of iterations before termination
+        icp_.setTransformationEpsilon(
+            transformation_epsilon_);          // Maximum allowed difference between two consecutive
+                                               // transformations
+        icp_.setEuclideanFitnessEpsilon(
+            euclidean_fitness_epsilon_);       // Maximum allowed fitness difference between two
 
         aligned_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
     }
@@ -43,18 +60,18 @@ class Register
         }
 
         // 设置输入：源是新点云，目标是全局地图
-        ndt_.setInputSource(source);
-        ndt_.setInputTarget(target);
+        icp_.setInputSource(source);
+        icp_.setInputTarget(target);
 
         // 执行配准
-        ndt_.align(*aligned_cloud_, last_transform_);
+        icp_.align(*aligned_cloud_, last_transform_);
 
-        if (ndt_.hasConverged()) {
-            Eigen::Matrix4f final_transform = ndt_.getFinalTransformation();
+        if (icp_.hasConverged()) {
+            Eigen::Matrix4f final_transform = icp_.getFinalTransformation();
             ROS_DEBUG_THROTTLE(
                 1,
                 "配准成功! 匹配分数: %f, 矩阵:\n%f %f %f %f\n%f %f %f %f\n%f %f %f %f\n%f %f %f %f",
-                ndt_.getFitnessScore(), final_transform(0, 0), final_transform(0, 1),
+                icp_.getFitnessScore(), final_transform(0, 0), final_transform(0, 1),
                 final_transform(0, 2), final_transform(0, 3), final_transform(1, 0),
                 final_transform(1, 1), final_transform(1, 2), final_transform(1, 3),
                 final_transform(2, 0), final_transform(2, 1), final_transform(2, 2),
@@ -71,13 +88,13 @@ class Register
     // 保留您可能需要的其他方法...
 
   private:
-    pcl::NormalDistributionsTransform<pcl::PointXYZ, pcl::PointXYZ> ndt_;
+    pcl::IterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ> icp_;
     pcl::PointCloud<pcl::PointXYZ>::Ptr aligned_cloud_;
 
-    float ndt_resolution_;
-    float step_size_;
-    float trans_eps_;
+    float max_correspondence_distance_;
     int max_iter_;
+    double transformation_epsilon_    = 1e-8;  // ICP specific param
+    double euclidean_fitness_epsilon_ = 0.01;  // ICP specific param
 
     Eigen::Matrix4f last_transform_;
 };
