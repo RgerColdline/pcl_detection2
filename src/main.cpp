@@ -116,13 +116,13 @@ class CloudAccumulator
         }
         pcl::transformPointCloud(*downsampled_livox_cloud_, *tf_livox_cloud_, transform);
 
-        if (downsampled_accumulated_cloud_->empty()) {
+        if (roi_filtered_cloud_->empty()) {
             ROS_WARN("首次点云，跳过配准");
         }
         else {
             pcl::transformPointCloud(
-                *downsampled_accumulated_cloud_, *register_map_cloud_,
-                register_->registerSourceToTarget(downsampled_accumulated_cloud_, tf_livox_cloud_));
+                *roi_filtered_cloud_, *register_map_cloud_,
+                register_->registerSourceToTarget(roi_filtered_cloud_, tf_livox_cloud_));
         }
 
         // *raw_accumulated_cloud_ = *downsampled_accumulated_cloud_ + *tf_livox_cloud_;
