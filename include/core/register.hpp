@@ -11,9 +11,11 @@ namespace pcl_detection2
 {
 namespace core
 {
-class Register
+template <typename PointT> class Register
 {
   public:
+    using PointCloudT    = pcl::PointCloud<PointT>;
+    using PointCloudPtrT = typename PointCloudT::Ptr;
     /**
      * @brief 配准构造
      * @param max_correspondence_distance 体素分辨率
@@ -41,7 +43,7 @@ class Register
         icp_.setEuclideanFitnessEpsilon(
             euclidean_fitness_epsilon_);       // Maximum allowed fitness difference between two
 
-        aligned_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+        aligned_cloud_.reset(new PointCloudT);
     }
 
     /**
@@ -51,9 +53,8 @@ class Register
      * @param initial_guess 初始位姿猜测（可选）
      * @return 将源点云变换到目标点云坐标系的变换矩阵 T_target_source
      */
-    const Eigen::Matrix4f &
-    registerSourceToTarget(const pcl::PointCloud<pcl::PointXYZ>::Ptr &source,
-                           const pcl::PointCloud<pcl::PointXYZ>::Ptr &target) {
+    const Eigen::Matrix4f &registerSourceToTarget(const PointCloudPtrT &source,
+                                                  const PointCloudPtrT &target) {
         if (source->empty() || target->empty()) {
             ROS_WARN_THROTTLE(1, "配准输入存在空点云，返回上次配准矩阵");
             return last_transform_;
@@ -88,8 +89,8 @@ class Register
     // 保留您可能需要的其他方法...
 
   private:
-    pcl::IterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ> icp_;
-    pcl::PointCloud<pcl::PointXYZ>::Ptr aligned_cloud_;
+    pcl::IterativeClosestPoint<PointT, PointT> icp_;
+    PointCloudPtrT aligned_cloud_;
 
     float max_correspondence_distance_;
     int max_iter_;
