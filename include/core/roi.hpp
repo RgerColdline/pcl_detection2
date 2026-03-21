@@ -4,6 +4,9 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 
+#include <Eigen/Dense>
+#include <memory>
+
 namespace pcl_detection2
 {
 
@@ -31,22 +34,23 @@ template <typename PointT> class CropBoxRoi
     CropBoxRoi(float uav_radius, float x_min, float x_max, float y_min, float y_max, float z_min,
                float z_max)
         : uav_radius_(uav_radius), x_min_(x_min), x_max_(x_max), y_min_(y_min), y_max_(y_max),
-          z_min_(z_min), z_max_(z_max) {}
+          z_min_(z_min), z_max_(z_max) {
+        roi_filter_ = std::make_unique<pcl::CropBox<PointT>>();
+        uav_vec_ << uav_radius_, uav_radius_, uav_radius_, 0;
+    }
     /**
      * @brief 裁掉立方体内或外点云
      * @param input 输入点云
      * @param output 输出点云
-     * @param reverse_roi 是否反向roi
      */
     void filterROI(PointCloudPtrT input, PointCloudPtrT output) {
         PointCloudPtrT temp_cloud(new PointCloudT);
         /***********template 3**************/
 
-        pcl::CropBox<PointT> roi_filter;
-        roi_filter.setInputCloud(input);
-        roi_filter.setMin(Eigen::Vector4f(x_min_, y_min_, z_min_, 1.0));
-        roi_filter.setMax(Eigen::Vector4f(x_max_, y_max_, z_max_, 1.0));
-        roi_filter.filter(*output);
+        roi_filter_->setInputCloud(input);
+        roi_filter_->setMin(Eigen::Vector4f(x_min_, y_min_, z_min_, 1.0));
+        roi_filter_->setMax(Eigen::Vector4f(x_max_, y_max_, z_max_, 1.0));
+        roi_filter_->filter(*output);
 
         /***********************************/
     }
@@ -54,24 +58,25 @@ template <typename PointT> class CropBoxRoi
      * @brief 裁掉立方体内或外点云
      * @param input 输入点云
      * @param output 输出点云
-     * @param reverse_roi 是否反向roi
+     * @param uav_position 无人机位置
      */
-    void xuavROI(PointCloudPtrT input, PointCloudPtrT output) {
+    void xuavROI(PointCloudPtrT input, PointCloudPtrT output, const Eigen::Vector4f &uav_position) {
         PointCloudPtrT temp_cloud(new PointCloudT);
         /***********template 3**************/
 
-        pcl::CropBox<PointT> roi_filter;
-        roi_filter.setInputCloud(input);
-        roi_filter.setMin(Eigen::Vector4f(uav_radius_, uav_radius_, uav_radius_, 1.0));
-        roi_filter.setMax(Eigen::Vector4f(uav_radius_, uav_radius_, uav_radius_, 1.0));
-        roi_filter.setNegative(true);
-        roi_filter.filter(*output);
+        roi_filter_->setInputCloud(input);
+        roi_filter_->setMin(uav_position - uav_vec_);
+        roi_filter_->setMax(uav_position + uav_vec_);
+        roi_filter_->setNegative(true);
+        roi_filter_->filter(*output);
 
         /***********************************/
     }
 
   private:
+    std::unique_ptr<pcl::CropBox<PointT>> roi_filter_;
     float uav_radius_;
+    Eigen::Vector4f uav_vec_;
     float x_min_;
     float x_max_;
     float y_min_;

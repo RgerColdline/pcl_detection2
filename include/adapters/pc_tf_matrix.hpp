@@ -1,5 +1,6 @@
 #pragma once
 
+#include <geometry_msgs/Pose.h>
 #include <geometry_msgs/PoseStamped.h>
 #include <ros/ros.h>
 
@@ -29,6 +30,34 @@ class PcTfMatrix
 
         return true;
     }
+
+    /**
+     * @brief 获取无人机的 Pose（位置 + 四元数）
+     * @param pose 输出的 Pose 消息
+     * @return 是否成功获取
+     */
+    bool get_pose(geometry_msgs::Pose &pose) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!lastest_msg_) return false;
+
+        pose = lastest_msg_->pose;
+        return true;
+    }
+
+    /**
+     * @brief 获取无人机的位置（Eigen::Vector4f）
+     * @param position 输出的位置向量 [x, y, z, 1]
+     * @return 是否成功获取
+     */
+    bool get_position(Eigen::Vector4f &position) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!lastest_msg_) return false;
+
+        position << lastest_msg_->pose.position.x, lastest_msg_->pose.position.y,
+            lastest_msg_->pose.position.z, 1.0f;
+        return true;
+    }
+
     void odometry_cb(const geometry_msgs::PoseStamped::ConstPtr &msg) {
         std::lock_guard<std::mutex> lock(mutex_);
         lastest_msg_ = msg;

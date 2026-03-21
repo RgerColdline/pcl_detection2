@@ -135,7 +135,13 @@ class CloudAccumulator
         ROS_INFO("[积累] 接收新点云：%zu 个点", raw_livox_cloud_->size());
 
         // 对原点云去无人机自身点云
-        crop_box_->xuavROI(raw_livox_cloud_, xuav_livox_cloud_);
+        Eigen::Vector4f uav_position;
+        if (tf_adapter_.get_position(uav_position)) {
+            crop_box_->xuavROI(raw_livox_cloud_, xuav_livox_cloud_, uav_position);
+        }
+        else {
+            pcl::copyPointCloud(*raw_livox_cloud_, *xuav_livox_cloud_);
+        }
         // 初次降采样：使用 AVERAGE 模式
         voxel_filter_->filterCloud(xuav_livox_cloud_, downsampled_livox_cloud_,
                                    VoxelFilterT::Mode::AVERAGE);
