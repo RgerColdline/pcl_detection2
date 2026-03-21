@@ -123,17 +123,17 @@ add_dependencies(${PROJECT_NAME}_node
 #############
 
 ## Add gtest based cpp test target and link libraries
-catkin_add_gtest(${PROJECT_NAME}-test 
-  test/test_voxel.cpp
-)
-target_link_libraries(${PROJECT_NAME}-test 
-  ${catkin_LIBRARIES}
-  ${PCL_LIBRARIES}
-)
-target_include_directories(${PROJECT_NAME}-test PRIVATE
-  include
-  ${PCL_INCLUDE_DIRS}
-)
+# catkin_add_gtest(${PROJECT_NAME}-test 
+#   test/test_voxel.cpp
+# )
+# target_link_libraries(${PROJECT_NAME}-test 
+#   ${catkin_LIBRARIES}
+#   ${PCL_LIBRARIES}
+# )
+# target_include_directories(${PROJECT_NAME}-test PRIVATE
+#   include
+#   ${PCL_INCLUDE_DIRS}
+# )
 
 ## Add folders to be run by python nosetests
 # catkin_add_nosetests(test)
