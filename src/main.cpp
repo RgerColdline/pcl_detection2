@@ -26,7 +26,6 @@ class CloudAccumulator
     CloudAccumulator(ros::NodeHandle &nh, ros::NodeHandle &pnh) : nh_(nh), pnh_(pnh) {
         // 初始化点云指针（原始→降采样→ROI→膨胀→腐蚀→投影）
         raw_livox_cloud_.reset(new PointCloudT);
-        xuav_livox_cloud_.reset(new PointCloudT);
         downsampled_livox_cloud_.reset(new PointCloudT);
         tf_livox_cloud_.reset(new PointCloudT);
         register_map_cloud_.reset(new PointCloudT);
@@ -57,6 +56,10 @@ class CloudAccumulator
         pnh_.param("initial_enable", pcl_enable_, false);
         nh_.setParam("/pcl_enable", pcl_enable_);
 
+        // livox roi参数
+        pnh_.param("livox_roi/uav_radius", livox_roi_uav_radius_, 0.3f);
+        pnh_.param("livox_roi/max_coord", livox_roi_max_coord_, 20.0f);
+
         // 降采样参数
         pnh_.param("voxel/leaf_size", voxel_leaf_size_, 0.05);
 
@@ -75,7 +78,6 @@ class CloudAccumulator
                    0.001f);
 
         // ROI区域参数
-        pnh_.param("roi/uav_radius", roi_uav_radius_, 0.3f);
         pnh_.param("roi/x_min", roi_x_min_, -0.5f);
         pnh_.param("roi/x_max", roi_x_max_, 4.5f);
         pnh_.param("roi/y_min", roi_y_min_, -7.0f);
@@ -96,7 +98,7 @@ class CloudAccumulator
 
         // roi器初始化
         crop_box_ = std::make_unique<pcl_detection2::core::CropBoxRoi<PointT>>(
-            roi_uav_radius_, roi_x_min_, roi_x_max_, roi_y_min_, roi_y_max_, roi_z_min_,
+            livox_roi_uav_radius_, roi_x_min_, roi_x_max_, roi_y_min_, roi_y_max_, roi_z_min_,
             roi_z_max_);
 
         // 配准器初始化
@@ -122,7 +124,8 @@ class CloudAccumulator
         }
 
         if (!pcl_detection2::adapters::LivoxConverter<PointT>::convert(
-                livox_msg, raw_livox_cloud_, map_tf_ini_intensity_, 20.0f, 0))
+                livox_msg, raw_livox_cloud_, map_tf_ini_intensity_, livox_roi_uav_radius_,
+                livox_roi_max_coord_, 0))
         {
             ROS_WARN("转换点云失败");
             return;
@@ -134,16 +137,8 @@ class CloudAccumulator
         }
         ROS_INFO("[积累] 接收新点云：%zu 个点", raw_livox_cloud_->size());
 
-        // 对原点云去无人机自身点云
-        Eigen::Vector4f uav_position;
-        if (tf_adapter_.get_position(uav_position)) {
-            crop_box_->xuavROI(raw_livox_cloud_, xuav_livox_cloud_, uav_position);
-        }
-        else {
-            pcl::copyPointCloud(*raw_livox_cloud_, *xuav_livox_cloud_);
-        }
         // 初次降采样：使用 AVERAGE 模式
-        voxel_filter_->filterCloud(xuav_livox_cloud_, downsampled_livox_cloud_,
+        voxel_filter_->filterCloud(raw_livox_cloud_, downsampled_livox_cloud_,
                                    VoxelFilterT::Mode::AVERAGE);
 
         Eigen::Affine3f transform;
@@ -330,7 +325,6 @@ class CloudAccumulator
 
     // 点云容器（六级处理：原始 → 降采样 → ROI过滤 → 膨胀 → 腐蚀 → 投影）
     PointCloudPtrT raw_livox_cloud_;
-    PointCloudPtrT xuav_livox_cloud_;
     PointCloudPtrT downsampled_livox_cloud_;
     PointCloudPtrT tf_livox_cloud_;
     PointCloudPtrT register_map_cloud_;
@@ -344,6 +338,9 @@ class CloudAccumulator
     // 参数
     // 启用参数
     bool pcl_enable_;
+    // livox ROI参数
+    float livox_roi_uav_radius_;
+    float livox_roi_max_coord_;
     // 降采样参数
     double voxel_leaf_size_;
     // 地图积累参数
@@ -357,7 +354,6 @@ class CloudAccumulator
     float register_transformation_epsilon_;
     float register_euclidean_fitness_epsilon_;
     // ROI参数
-    float roi_uav_radius_;
     float roi_x_min_, roi_x_max_;
     float roi_y_min_, roi_y_max_;
     float roi_z_min_, roi_z_max_;

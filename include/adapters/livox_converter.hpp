@@ -30,7 +30,8 @@ template <typename PointT> class LivoxConverter
      */
     static bool convert(const livox_ros_driver2::CustomMsg::ConstPtr &livox_msg,
                         PointCloudPtrT &output_cloud, float tf_ini_intensity = 0.5f,
-                        const float max_coord = 20.0f, int debug_level = 0) {
+                        const float uav_radius = 0.3f, const float max_coord = 20.0f,
+                        int debug_level = 0) {
         if (!livox_msg) {
             ROS_ERROR("livox 点云消息为空！！！");
             return false;
@@ -49,7 +50,8 @@ template <typename PointT> class LivoxConverter
         for (const auto &point : livox_msg->points) {
             if (std::isnan(point.x) || std::isnan(point.y) || std::isnan(point.z) ||
                 std::isinf(point.x) || std::isinf(point.y) || std::isinf(point.z) ||
-                std::abs(point.x) > max_coord || std::abs(point.y) > max_coord ||
+                std::abs(point.x) > max_coord || std::abs(point.x) < uav_radius ||
+                std::abs(point.y) > max_coord || std::abs(point.y) < uav_radius ||
                 std::abs(point.z) > max_coord)
             {
                 invalid_count++;
