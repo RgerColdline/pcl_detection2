@@ -14,6 +14,7 @@ register:
   euclidean_fitness_epsilon: 0.001
 
 roi:
+  uav_radius: 0.3
   x_min: -0.5
   x_max: 4.5
   y_min: -7.0

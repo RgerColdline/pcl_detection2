@@ -29,7 +29,8 @@ template <typename PointT> class LivoxConverter
      * @param debug_level 调试级别：0=无输出，1=只输出摘要，2=输出详细点信息
      */
     static bool convert(const livox_ros_driver2::CustomMsg::ConstPtr &livox_msg,
-                        PointCloudPtrT &output_cloud, float tf_ini_intensity = 0.5f, int debug_level = 0) {
+                        PointCloudPtrT &output_cloud, float tf_ini_intensity = 0.5f,
+                        const float max_coord = 20.0f, int debug_level = 0) {
         if (!livox_msg) {
             ROS_ERROR("livox 点云消息为空！！！");
             return false;
@@ -42,15 +43,14 @@ template <typename PointT> class LivoxConverter
         output_cloud->clear();
         output_cloud->reserve(livox_msg->point_num);
 
-        int count             = 0;
-        int invalid_count     = 0;
-        const float MAX_COORD = 20.0f;
+        int count         = 0;
+        int invalid_count = 0;
 
         for (const auto &point : livox_msg->points) {
             if (std::isnan(point.x) || std::isnan(point.y) || std::isnan(point.z) ||
                 std::isinf(point.x) || std::isinf(point.y) || std::isinf(point.z) ||
-                std::abs(point.x) > MAX_COORD || std::abs(point.y) > MAX_COORD ||
-                std::abs(point.z) > MAX_COORD)
+                std::abs(point.x) > max_coord || std::abs(point.y) > max_coord ||
+                std::abs(point.z) > max_coord)
             {
                 invalid_count++;
                 continue;

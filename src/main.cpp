@@ -1,14 +1,11 @@
 #include "adapters/livox_converter.hpp"
 #include "adapters/pc_tf_matrix.hpp"
 #include "core/register.hpp"
+#include "core/roi.hpp"
 #include "core/voxel.hpp"
 
-#include <pcl/filters/crop_box.h>
-#include <pcl/filters/passthrough.h>
 #include <pcl/filters/project_inliers.h>
 #include <pcl/filters/statistical_outlier_removal.h>
-#include <pcl/filters/voxel_grid.h>
-#include <pcl/kdtree/kdtree_flann.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl/sample_consensus/model_types.h>
@@ -29,6 +26,7 @@ class CloudAccumulator
     CloudAccumulator(ros::NodeHandle &nh, ros::NodeHandle &pnh) : nh_(nh), pnh_(pnh) {
         // 初始化点云指针（原始→降采样→ROI→膨胀→腐蚀→投影）
         raw_livox_cloud_.reset(new PointCloudT);
+        xuav_livox_cloud_.reset(new PointCloudT);
         downsampled_livox_cloud_.reset(new PointCloudT);
         tf_livox_cloud_.reset(new PointCloudT);
         register_map_cloud_.reset(new PointCloudT);
@@ -77,12 +75,13 @@ class CloudAccumulator
                    0.001f);
 
         // ROI区域参数
-        pnh_.param("roi/x_min", roi_x_min_, -0.5);
-        pnh_.param("roi/x_max", roi_x_max_, 4.5);
-        pnh_.param("roi/y_min", roi_y_min_, -7.0);
-        pnh_.param("roi/y_max", roi_y_max_, 1.0);
-        pnh_.param("roi/z_min", roi_z_min_, 0.3);
-        pnh_.param("roi/z_max", roi_z_max_, 2.0);
+        pnh_.param("roi/uav_radius", roi_uav_radius_, 0.3f);
+        pnh_.param("roi/x_min", roi_x_min_, -0.5f);
+        pnh_.param("roi/x_max", roi_x_max_, 4.5f);
+        pnh_.param("roi/y_min", roi_y_min_, -7.0f);
+        pnh_.param("roi/y_max", roi_y_max_, 1.0f);
+        pnh_.param("roi/z_min", roi_z_min_, 0.3f);
+        pnh_.param("roi/z_max", roi_z_max_, 2.0f);
 
         // 膨胀参数
         pnh_.param("dilation/radius", dilation_radius_, 0.25);
@@ -95,8 +94,10 @@ class CloudAccumulator
         // 投影参数（默认投影到Z=0的地面平面）
         pnh_.param("projection/plane_z", projection_plane_z_, 0.7f);
 
-        // 点云变换器初始化
-        // tf_adapter_ 是栈上成员，不需要初始化
+        // roi器初始化
+        crop_box_ = std::make_unique<pcl_detection2::core::CropBoxRoi<PointT>>(
+            roi_uav_radius_, roi_x_min_, roi_x_max_, roi_y_min_, roi_y_max_, roi_z_min_,
+            roi_z_max_);
 
         // 配准器初始化
         register_ = std::make_unique<pcl_detection2::core::Register<PointT>>(
@@ -120,8 +121,8 @@ class CloudAccumulator
             }
         }
 
-        if (!pcl_detection2::adapters::LivoxConverter<PointT>::convert(livox_msg, raw_livox_cloud_,
-                                                                       map_tf_ini_intensity_, 0))
+        if (!pcl_detection2::adapters::LivoxConverter<PointT>::convert(
+                livox_msg, raw_livox_cloud_, map_tf_ini_intensity_, 20.0f, 0))
         {
             ROS_WARN("转换点云失败");
             return;
@@ -133,8 +134,10 @@ class CloudAccumulator
         }
         ROS_INFO("[积累] 接收新点云：%zu 个点", raw_livox_cloud_->size());
 
+        // 对原点云去无人机自身点云
+        crop_box_->filterROI(raw_livox_cloud_, xuav_livox_cloud_, true);
         // 初次降采样：使用 AVERAGE 模式
-        voxel_filter_->filterCloud(raw_livox_cloud_, downsampled_livox_cloud_,
+        voxel_filter_->filterCloud(xuav_livox_cloud_, downsampled_livox_cloud_,
                                    VoxelFilterT::Mode::AVERAGE);
 
         Eigen::Affine3f transform;
@@ -165,7 +168,7 @@ class CloudAccumulator
         /***********************************/
 
         // ROI区域过滤
-        filterROI(downsampled_accumulated_cloud_, roi_filtered_cloud_);
+        crop_box_->filterROI(downsampled_accumulated_cloud_, roi_filtered_cloud_, false);
 
         // 点云腐蚀处理
         erodePointCloud(roi_filtered_cloud_, eroded_cloud_);
@@ -186,80 +189,12 @@ class CloudAccumulator
     }
 
   private:
-    // ROI过滤核心函数
-    void filterROI(PointCloudPtrT input, PointCloudPtrT output) {
-        PointCloudPtrT temp_cloud(new PointCloudT);
-        /***********template 3**************/
-
-        pcl::CropBox<PointT> roi_filter;
-        roi_filter.setInputCloud(input);
-        roi_filter.setMin(Eigen::Vector4f(roi_x_min_, roi_y_min_, roi_z_min_, 1.0));
-        roi_filter.setMax(Eigen::Vector4f(roi_x_max_, roi_y_max_, roi_z_max_, 1.0));
-        roi_filter.filter(*output);
-
-        /***********************************/
-    }
-
     // 点云膨胀核心函数
     void dilatePointCloud(PointCloudPtrT input, PointCloudPtrT output) {
         // float resolution = 0.05f;
         // float radius     = 0.15f;
         output->clear();
         if (input->empty()) return;
-
-        // /***********template 4**************/
-        // using VoxelSet = std::unordered_set<Eigen::Vector3i, VoxelKeyHash>;
-        // VoxelSet occupied_voxels;
-
-        // // 1. 体素化：将点映射到网格索引
-        // for (const auto &pt : input->points)
-        // {
-        //     Eigen::Vector3i idx(
-        //         static_cast<int>(std::floor(pt.x / resolution)),
-        //         static_cast<int>(std::floor(pt.y / resolution)),
-        //         static_cast<int>(std::floor(pt.z / resolution)));
-        //     occupied_voxels.insert(idx);
-        // }
-
-        // // 2. 球形膨胀：遍历邻域并校验欧氏距离
-        // VoxelSet dilated_voxels;
-        // int voxel_range = static_cast<int>(std::ceil(radius / resolution));
-        // float radius_sq = radius * radius;
-
-        // for (const auto &voxel : occupied_voxels)
-        // {
-        //     for (int dx = -voxel_range; dx <= voxel_range; ++dx)
-        //     {
-        //         for (int dy = -voxel_range; dy <= voxel_range; ++dy)
-        //         {
-        //             for (int dz = -voxel_range; dz <= voxel_range; ++dz)
-        //             {
-        //                 // 球形校验：体素中心距离 <= 膨胀半径
-        //                 float dist_sq = (dx * resolution) * (dx * resolution) +
-        //                                 (dy * resolution) * (dy * resolution) +
-        //                                 (dz * resolution) * (dz * resolution);
-
-        //                 if (dist_sq <= radius_sq)
-        //                 {
-        //                     dilated_voxels.insert(voxel + Eigen::Vector3i(dx, dy, dz));
-        //                 }
-        //             }
-        //         }
-        //     }
-        // }
-
-        // // 3. 重构：将体素索引转回点云坐标 (体素中心)
-        // output->reserve(dilated_voxels.size());
-        // float half_res = resolution * 0.5f;
-        // for (const auto &voxel : dilated_voxels)
-        // {
-        //     pcl::PointXYZ p;
-        //     p.x = (voxel[0] + 0.5f) * resolution;
-        //     p.y = (voxel[1] + 0.5f) * resolution;
-        //     p.z = (voxel[2] + 0.5f) * resolution;
-        //     output->push_back(p);
-        // }
-        // /***********************************/
 
         static PointCloudPtrT temppc(new PointCloudT);
         temppc->clear();
@@ -288,21 +223,6 @@ class CloudAccumulator
         output->clear();
         if (input->empty()) return;
 
-        // // 构建KD-Tree：用于快速搜索邻域点
-        // pcl::KdTreeFLANN<pcl::PointXYZ> kdtree;
-        // kdtree.setInputCloud(input);
-
-        // // 遍历每个点，统计邻域点数
-        // std::vector<int> point_indices;
-        // std::vector<float> point_distances;
-        // for (const auto &point : *input)
-        // {
-        //     // 搜索radius范围内的所有邻域点（包含自身）
-        //     /***********template 5**************/
-
-        //     /***********************************/
-        // }
-
         pcl::StatisticalOutlierRemoval<PointT> sorfilter;
         sorfilter.setInputCloud(input);
         sorfilter.setMeanK(erosion_mean_k_);
@@ -315,19 +235,6 @@ class CloudAccumulator
         output->clear();
         if (input->empty()) return;
 
-        // // 遍历所有点，将Z坐标强制设为投影平面的Z值（X/Y保持不变）
-        // for (const auto &point : *input)
-        // {
-        //     pcl::PointXYZ projected_point;
-        //     projected_point.x = point.x;             // X坐标不变
-        //     projected_point.y = point.y;             // Y坐标不变
-        //     projected_point.z = projection_plane_z_; // Z坐标投影到指定平面
-        //     output->push_back(projected_point);
-        // }
-
-        // /***********template 6**************/
-
-        // /***********************************/
         pcl::ModelCoefficients::Ptr ground(new pcl::ModelCoefficients);
         ground->values = {0.0, 0.0, 1.0, -projection_plane_z_};  // [a,b,c,d]
 
@@ -411,11 +318,13 @@ class CloudAccumulator
     ros::Publisher projected_cloud_pub_;  // 新增：投影点云发布器
 
     pcl_detection2::adapters::PcTfMatrix tf_adapter_;
+    std::unique_ptr<pcl_detection2::core::CropBoxRoi<PointT>> crop_box_;
     std::unique_ptr<pcl_detection2::core::Register<PointT>> register_;
     std::unique_ptr<pcl_detection2::core::VoxelGridUnified<PointT>> voxel_filter_;
 
     // 点云容器（六级处理：原始 → 降采样 → ROI过滤 → 膨胀 → 腐蚀 → 投影）
     PointCloudPtrT raw_livox_cloud_;
+    PointCloudPtrT xuav_livox_cloud_;
     PointCloudPtrT downsampled_livox_cloud_;
     PointCloudPtrT tf_livox_cloud_;
     PointCloudPtrT register_map_cloud_;
@@ -442,9 +351,10 @@ class CloudAccumulator
     float register_transformation_epsilon_;
     float register_euclidean_fitness_epsilon_;
     // ROI参数
-    double roi_x_min_, roi_x_max_;
-    double roi_y_min_, roi_y_max_;
-    double roi_z_min_, roi_z_max_;
+    float roi_uav_radius_;
+    float roi_x_min_, roi_x_max_;
+    float roi_y_min_, roi_y_max_;
+    float roi_z_min_, roi_z_max_;
     // 膨胀参数
     double dilation_radius_;
     int dilation_steps_;
