@@ -43,7 +43,7 @@ class CloudAccumulator
         cloud_sub_ = nh_.subscribe("/livox/lidar", 1, &CloudAccumulator::cloudCallback, this);
         odometry_sub_ =
             nh_.subscribe("/mavros/local_position/pose", 1,
-                          &pcl_detection2::adapters::PcTfMatrix::odometry_cb, tf_adapter_.get());
+                          &pcl_detection2::adapters::PcTfMatrix::odometry_cb, &tf_adapter_);
         accumulated_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/accumulated_cloud", 1);
         downsampled_cloud_pub_ =
             nh_.advertise<sensor_msgs::PointCloud2>("/downsampled_accumulated_cloud", 1);
@@ -96,10 +96,10 @@ class CloudAccumulator
         pnh_.param("projection/plane_z", projection_plane_z_, 0.7f);
 
         // 点云变换器初始化
-        tf_adapter_ = std::make_unique<pcl_detection2::adapters::PcTfMatrix>();
+        // tf_adapter_ 是栈上成员，不需要初始化
 
         // 配准器初始化
-        register_   = std::make_unique<pcl_detection2::core::Register<PointT>>(
+        register_ = std::make_unique<pcl_detection2::core::Register<PointT>>(
             register_max_correspondence_distance_, register_max_iter_,
             register_transformation_epsilon_, register_euclidean_fitness_epsilon_);
 
@@ -138,7 +138,7 @@ class CloudAccumulator
                                    VoxelFilterT::Mode::AVERAGE);
 
         Eigen::Affine3f transform;
-        if (!tf_adapter_->get_transform(transform)) {
+        if (!tf_adapter_.get_transform(transform)) {
             ROS_WARN_THROTTLE(1.0, "里程计无消息，等待中");
             return;
         }
@@ -410,7 +410,7 @@ class CloudAccumulator
     ros::Publisher eroded_cloud_pub_;
     ros::Publisher projected_cloud_pub_;  // 新增：投影点云发布器
 
-    std::unique_ptr<pcl_detection2::adapters::PcTfMatrix> tf_adapter_;
+    pcl_detection2::adapters::PcTfMatrix tf_adapter_;
     std::unique_ptr<pcl_detection2::core::Register<PointT>> register_;
     std::unique_ptr<pcl_detection2::core::VoxelGridUnified<PointT>> voxel_filter_;
 
