@@ -158,7 +158,7 @@ class CloudAccumulator
         }
         else {
             pcl::transformPointCloud(
-                *roi_filtered_cloud_, *register_map_cloud_,
+                *downsampled_accumulated_cloud_, *register_map_cloud_,
                 register_->registerSourceToTarget(roi_filtered_cloud_, tf_livox_cloud_));
         }
 
