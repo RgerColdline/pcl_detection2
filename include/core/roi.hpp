@@ -38,7 +38,7 @@ template <typename PointT> class CropBoxRoi
      * @param output 输出点云
      * @param reverse_roi 是否反向roi
      */
-    void filterROI(PointCloudPtrT input, PointCloudPtrT output, bool reverse_roi = false) {
+    void filterROI(PointCloudPtrT input, PointCloudPtrT output) {
         PointCloudPtrT temp_cloud(new PointCloudT);
         /***********template 3**************/
 
@@ -46,7 +46,25 @@ template <typename PointT> class CropBoxRoi
         roi_filter.setInputCloud(input);
         roi_filter.setMin(Eigen::Vector4f(x_min_, y_min_, z_min_, 1.0));
         roi_filter.setMax(Eigen::Vector4f(x_max_, y_max_, z_max_, 1.0));
-        roi_filter.setNegative(reverse_roi);
+        roi_filter.filter(*output);
+
+        /***********************************/
+    }
+    /**
+     * @brief 裁掉立方体内或外点云
+     * @param input 输入点云
+     * @param output 输出点云
+     * @param reverse_roi 是否反向roi
+     */
+    void xuavROI(PointCloudPtrT input, PointCloudPtrT output) {
+        PointCloudPtrT temp_cloud(new PointCloudT);
+        /***********template 3**************/
+
+        pcl::CropBox<PointT> roi_filter;
+        roi_filter.setInputCloud(input);
+        roi_filter.setMin(Eigen::Vector4f(uav_radius_, uav_radius_, uav_radius_, 1.0));
+        roi_filter.setMax(Eigen::Vector4f(uav_radius_, uav_radius_, uav_radius_, 1.0));
+        roi_filter.setNegative(true);
         roi_filter.filter(*output);
 
         /***********************************/

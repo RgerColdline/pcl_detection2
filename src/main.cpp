@@ -135,7 +135,7 @@ class CloudAccumulator
         ROS_INFO("[积累] 接收新点云：%zu 个点", raw_livox_cloud_->size());
 
         // 对原点云去无人机自身点云
-        crop_box_->filterROI(raw_livox_cloud_, xuav_livox_cloud_, true);
+        crop_box_->xuavROI(raw_livox_cloud_, xuav_livox_cloud_);
         // 初次降采样：使用 AVERAGE 模式
         voxel_filter_->filterCloud(xuav_livox_cloud_, downsampled_livox_cloud_,
                                    VoxelFilterT::Mode::AVERAGE);
@@ -168,7 +168,7 @@ class CloudAccumulator
         /***********************************/
 
         // ROI区域过滤
-        crop_box_->filterROI(downsampled_accumulated_cloud_, roi_filtered_cloud_, false);
+        crop_box_->filterROI(downsampled_accumulated_cloud_, roi_filtered_cloud_);
 
         // 点云腐蚀处理
         erodePointCloud(roi_filtered_cloud_, eroded_cloud_);
