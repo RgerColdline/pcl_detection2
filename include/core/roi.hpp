@@ -50,6 +50,7 @@ template <typename PointT> class CropBoxRoi
         roi_filter_->setInputCloud(input);
         roi_filter_->setMin(Eigen::Vector4f(x_min_, y_min_, z_min_, 1.0));
         roi_filter_->setMax(Eigen::Vector4f(x_max_, y_max_, z_max_, 1.0));
+        roi_filter_->setNegative(false);
         roi_filter_->filter(*output);
 
         /***********************************/
