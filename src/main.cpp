@@ -42,6 +42,7 @@ class CloudAccumulator
             nh_.subscribe("/mavros/local_position/pose", 1,
                           &pcl_detection2::adapters::PcTfMatrix::odometry_cb, &tf_adapter_);
         accumulated_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/accumulated_cloud", 1);
+        raw_livox_cloud_pub_   = nh_.advertise<sensor_msgs::PointCloud2>("/raw_livox_cloud", 1);
         downsampled_cloud_pub_ =
             nh_.advertise<sensor_msgs::PointCloud2>("/downsampled_accumulated_cloud", 1);
         roi_filtered_pub_ =
@@ -259,6 +260,16 @@ class CloudAccumulator
         accumulated_cloud_pub_.publish(output_msg);
     }
 
+
+    // 发布原始livox点云
+    void publishRawLivoxCloud(const std_msgs::Header &header) {
+        if (raw_livox_cloud_->empty()) return;
+        sensor_msgs::PointCloud2 output_msg;
+        pcl::toROSMsg(*raw_livox_cloud_, output_msg);
+        output_msg.header = header;
+        raw_livox_cloud_pub_.publish(output_msg);
+    }
+
     // 发布降采样后点云
     void publishDownsampledCloud(const std_msgs::Header &header) {
         if (downsampled_accumulated_cloud_->empty()) return;
@@ -312,6 +323,7 @@ class CloudAccumulator
     ros::Subscriber cloud_sub_;
     ros::Subscriber odometry_sub_;
     ros::Publisher accumulated_cloud_pub_;
+    ros::Publisher raw_livox_cloud_pub_;
     ros::Publisher downsampled_cloud_pub_;
     ros::Publisher roi_filtered_pub_;
     ros::Publisher dilated_cloud_pub_;
