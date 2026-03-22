@@ -137,7 +137,7 @@ class CloudAccumulator
             ROS_WARN("接收到空点云，跳过积累");
             return;
         }
-        ROS_INFO("[积累] 接收新点云：%zu 个点", raw_livox_cloud_->size());
+        ROS_INFO_THROTTLE(1, "[积累] 接收新点云：%zu 个点", raw_livox_cloud_->size());
 
         // 初次降采样：使用 AVERAGE 模式
         voxel_filter_->filterCloud(raw_livox_cloud_, downsampled_livox_cloud_,
@@ -315,8 +315,8 @@ class CloudAccumulator
         pcl::toROSMsg(*projected_cloud_, output_msg);
         output_msg.header = header;
         projected_cloud_pub_.publish(output_msg);
-        ROS_INFO("[发布] 投影点云已发布到 /projected_accumulated_cloud，点数：%zu",
-                 projected_cloud_->size());
+        ROS_INFO_THROTTLE(1, "[发布] 投影点云已发布到 /projected_accumulated_cloud，点数：%zu",
+                          projected_cloud_->size());
     }
 
   private:

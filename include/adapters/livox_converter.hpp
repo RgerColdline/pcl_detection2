@@ -48,11 +48,24 @@ template <typename PointT> class LivoxConverter
         int invalid_count = 0;
 
         for (const auto &point : livox_msg->points) {
+            // if (std::isnan(point.x) || std::isnan(point.y) || std::isnan(point.z) ||
+            //     std::isinf(point.x) || std::isinf(point.y) || std::isinf(point.z) ||
+            //     std::abs(point.x) > max_coord || std::abs(point.x) < uav_radius ||
+            //     std::abs(point.y) > max_coord || std::abs(point.y) < uav_radius ||
+            //     std::abs(point.z) > max_coord)
+            // {
+            //     invalid_count++;
+            //     if (debug_level >= 2 && invalid_count % 5 == 1) {
+            //         ROS_INFO("第%d个无效点：(%.3f,%.3f,%.3f)", invalid_count, point.x, point.y,
+            //                  point.z);
+            //     }
+            //     continue;
+            // }
             if (std::isnan(point.x) || std::isnan(point.y) || std::isnan(point.z) ||
                 std::isinf(point.x) || std::isinf(point.y) || std::isinf(point.z) ||
-                std::abs(point.x) > max_coord || std::abs(point.x) < uav_radius ||
-                std::abs(point.y) > max_coord || std::abs(point.y) < uav_radius ||
-                std::abs(point.z) > max_coord)
+                std::abs(point.x) > max_coord || std::abs(point.y) > max_coord ||
+                std::abs(point.z) > max_coord ||
+                (std::abs(point.x) < uav_radius && std::abs(point.y) < uav_radius))
             {
                 invalid_count++;
                 if (debug_level >= 2 && invalid_count % 5 == 1) {
@@ -81,12 +94,13 @@ template <typename PointT> class LivoxConverter
         }
 
         if (invalid_count > 0 && debug_level >= 1) {
-            ROS_WARN("Livox 转换：过滤 %d 个异常点，保留 %lu 个点", invalid_count,
-                     output_cloud->size());
+            ROS_WARN_THROTTLE(1, "Livox 转换：过滤 %d 个异常点，保留 %lu 个点", invalid_count,
+                              output_cloud->size());
         }
 
         if (debug_level >= 1) {
-            ROS_INFO("Livox 转换：输入=%d, 输出=%lu", livox_msg->point_num, output_cloud->size());
+            ROS_INFO_THROTTLE(1, "Livox 转换：输入=%d, 输出=%lu", livox_msg->point_num,
+                              output_cloud->size());
         }
 
         output_cloud->width    = output_cloud->size();
