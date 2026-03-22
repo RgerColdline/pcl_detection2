@@ -27,8 +27,8 @@ dilation:
   steps: 12
 
 erosion:
-  mean_k: 7 #越大过滤越狠
-  thresh: 1.0 #越小过滤越狠
+  mean_k: 6 #越大过滤越狠
+  thresh: 1.5 #越小过滤越狠
 
 projection:
   plane_z: 0.7
