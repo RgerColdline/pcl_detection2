@@ -1,5 +1,9 @@
 initial_enable: false
 
+livox_roi:
+  uav_radius: 0.3
+  max_coord: 20.0
+
 voxel:
   leaf_size: 0.05
 
