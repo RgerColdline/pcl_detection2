@@ -183,6 +183,7 @@ class CloudAccumulator
 
         // 8. 发布各类点云
         publishAccumulatedCloud(livox_msg->header);
+        publishRawLivoxCloud(livox_msg->header);
         publishDownsampledCloud(livox_msg->header);
         publishROIFilteredCloud(livox_msg->header);
         publishDilatedCloud(livox_msg->header);
