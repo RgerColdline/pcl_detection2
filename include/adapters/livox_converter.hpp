@@ -55,6 +55,10 @@ template <typename PointT> class LivoxConverter
                 std::abs(point.z) > max_coord)
             {
                 invalid_count++;
+                if (debug_level >= 2 && invalid_count % 5 == 1) {
+                    ROS_INFO("第%d个无效点：(%.3f,%.3f,%.3f)", invalid_count, point.x, point.y,
+                             point.z);
+                }
                 continue;
             }
 

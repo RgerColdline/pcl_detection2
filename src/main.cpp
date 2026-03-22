@@ -60,6 +60,7 @@ class CloudAccumulator
         // livox roi参数
         pnh_.param("livox_roi/uav_radius", livox_roi_uav_radius_, 0.3f);
         pnh_.param("livox_roi/max_coord", livox_roi_max_coord_, 20.0f);
+        pnh_.param("livox_roi/debug_level", livox_roi_debug_level_, 0);
 
         // 降采样参数
         pnh_.param("voxel/leaf_size", voxel_leaf_size_, 0.05);
@@ -126,7 +127,7 @@ class CloudAccumulator
 
         if (!pcl_detection2::adapters::LivoxConverter<PointT>::convert(
                 livox_msg, raw_livox_cloud_, map_tf_ini_intensity_, livox_roi_uav_radius_,
-                livox_roi_max_coord_, 0))
+                livox_roi_max_coord_, livox_roi_debug_level_))
         {
             ROS_WARN("转换点云失败");
             return;
@@ -354,6 +355,7 @@ class CloudAccumulator
     // livox ROI参数
     float livox_roi_uav_radius_;
     float livox_roi_max_coord_;
+    int livox_roi_debug_level_;
     // 降采样参数
     double voxel_leaf_size_;
     // 地图积累参数
