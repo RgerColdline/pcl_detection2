@@ -4,6 +4,7 @@
 #include "core/roi.hpp"
 #include "core/voxel.hpp"
 
+#include <pcl/common/transforms.h>
 #include <pcl/filters/project_inliers.h>
 #include <pcl/filters/statistical_outlier_removal.h>
 #include <pcl/point_cloud.h>
@@ -13,9 +14,9 @@
 #include <ros/ros.h>
 #include <sensor_msgs/PointCloud2.h>
 
-#include <unordered_set>
+#include <cmath>
+#include <deque>
 
-// 点云积累类（连续降采样 + ROI过滤 + 膨胀 + 腐蚀 + 平面投影）
 class CloudAccumulator
 {
   public:
@@ -23,24 +24,25 @@ class CloudAccumulator
     using PointCloudT    = pcl::PointCloud<PointT>;
     using PointCloudPtrT = PointCloudT::Ptr;
     using VoxelFilterT   = pcl_detection2::core::VoxelGridUnified<PointT>;
+    using RegisterT      = pcl_detection2::core::Register<PointT>;
+
     CloudAccumulator(ros::NodeHandle &nh, ros::NodeHandle &pnh) : nh_(nh), pnh_(pnh) {
-        // 初始化点云指针（原始→降采样→ROI→膨胀→腐蚀→投影）
         raw_livox_cloud_.reset(new PointCloudT);
         downsampled_livox_cloud_.reset(new PointCloudT);
-        tf_livox_cloud_.reset(new PointCloudT);
-        register_map_cloud_.reset(new PointCloudT);
-        raw_accumulated_cloud_.reset(new PointCloudT);
-        downsampled_accumulated_cloud_.reset(new PointCloudT);
+        predicted_livox_cloud_.reset(new PointCloudT);
+        aligned_livox_cloud_.reset(new PointCloudT);
+        local_map_cloud_.reset(new PointCloudT);
+        downsampled_local_map_cloud_.reset(new PointCloudT);
         roi_filtered_cloud_.reset(new PointCloudT);
-        dilated_cloud_.reset(new PointCloudT);
         eroded_cloud_.reset(new PointCloudT);
-        projected_cloud_.reset(new PointCloudT);  // 新增：投影后点云
+        dilated_cloud_.reset(new PointCloudT);
+        projected_cloud_.reset(new PointCloudT);
 
-        // 订阅/发布器
         cloud_sub_ = nh_.subscribe("/livox/lidar", 1, &CloudAccumulator::cloudCallback, this);
         odometry_sub_ =
             nh_.subscribe("/mavros/local_position/pose", 1,
                           &pcl_detection2::adapters::PcTfMatrix::odometry_cb, &tf_adapter_);
+
         accumulated_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/accumulated_cloud", 1);
         raw_livox_cloud_pub_   = nh_.advertise<sensor_msgs::PointCloud2>("/raw_livox_cloud", 1);
         downsampled_cloud_pub_ =
@@ -50,36 +52,34 @@ class CloudAccumulator
         dilated_cloud_pub_ =
             nh_.advertise<sensor_msgs::PointCloud2>("/dilated_accumulated_cloud", 1);
         eroded_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/eroded_accumulated_cloud", 1);
-        projected_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
-            "/projected_accumulated_cloud", 1);  // 新增：投影结果发布
+        projected_cloud_pub_ =
+            nh_.advertise<sensor_msgs::PointCloud2>("/projected_accumulated_cloud", 1);
 
-        // 启用参数
         pnh_.param("initial_enable", pcl_enable_, false);
         nh_.setParam("/pcl_enable", pcl_enable_);
 
-        // livox roi参数
         pnh_.param("livox_roi/uav_radius", livox_roi_uav_radius_, 0.3f);
         pnh_.param("livox_roi/max_coord", livox_roi_max_coord_, 20.0f);
         pnh_.param("livox_roi/debug_level", livox_roi_debug_level_, 0);
 
-        // 降采样参数
         pnh_.param("voxel/leaf_size", voxel_leaf_size_, 0.05);
 
-        // 地图累计参数
         pnh_.param("map/decay_coeff", map_decay_coeff_, 0.3f);
-        map_r_decay_coeff_ = 1 - map_decay_coeff_;
+        map_r_decay_coeff_ = 1.0f - map_decay_coeff_;
         pnh_.param("map/ini_intensity", map_ini_intensity_, 50.0f);
-        map_tf_ini_intensity_ = map_ini_intensity_ / map_r_decay_coeff_ / 100;
+        map_tf_ini_intensity_ = map_ini_intensity_ / map_r_decay_coeff_ / 100.0f;
+        pnh_.param("map/local_frame_num", local_map_frame_num_, 15);
 
-        // 配准参数
         pnh_.param("register/max_correspondence_distance", register_max_correspondence_distance_,
                    0.5f);
         pnh_.param("register/max_iter", register_max_iter_, 50);
         pnh_.param("register/transformation_epsilon", register_transformation_epsilon_, 1e-8f);
         pnh_.param("register/euclidean_fitness_epsilon", register_euclidean_fitness_epsilon_,
                    0.001f);
+        pnh_.param("register/max_fitness_score", register_max_fitness_score_, 0.3f);
+        pnh_.param("register/max_translation_delta", register_max_translation_delta_, 0.6f);
+        pnh_.param("register/max_rotation_delta_deg", register_max_rotation_delta_deg_, 20.0f);
 
-        // ROI区域参数
         pnh_.param("roi/x_min", roi_x_min_, -0.5f);
         pnh_.param("roi/x_max", roi_x_max_, 4.5f);
         pnh_.param("roi/y_min", roi_y_min_, -7.0f);
@@ -87,183 +87,225 @@ class CloudAccumulator
         pnh_.param("roi/z_min", roi_z_min_, 0.3f);
         pnh_.param("roi/z_max", roi_z_max_, 2.0f);
 
-        // 膨胀参数
         pnh_.param("dilation/radius", dilation_radius_, 0.25);
         pnh_.param("dilation/steps", dilation_steps_, 12);
 
-        // 腐蚀参数
         pnh_.param("erosion/mean_k", erosion_mean_k_, 5);
         pnh_.param("erosion/thresh", erosion_thresh_, 0.5);
 
-        // 投影参数（默认投影到Z=0的地面平面）
         pnh_.param("projection/plane_z", projection_plane_z_, 0.7f);
 
-        // roi器初始化
         crop_box_ = std::make_unique<pcl_detection2::core::CropBoxRoi<PointT>>(
             livox_roi_uav_radius_, roi_x_min_, roi_x_max_, roi_y_min_, roi_y_max_, roi_z_min_,
             roi_z_max_);
-
-        // 配准器初始化
-        register_ = std::make_unique<pcl_detection2::core::Register<PointT>>(
-            register_max_correspondence_distance_, register_max_iter_,
-            register_transformation_epsilon_, register_euclidean_fitness_epsilon_);
-
-        // 体素滤波器初始化
-        voxel_filter_ = std::make_unique<pcl_detection2::core::VoxelGridUnified<PointT>>(
-            voxel_leaf_size_, map_r_decay_coeff_);
+        register_ = std::make_unique<RegisterT>(register_max_correspondence_distance_,
+                                                register_max_iter_,
+                                                register_transformation_epsilon_,
+                                                register_euclidean_fitness_epsilon_);
+        voxel_filter_ = std::make_unique<VoxelFilterT>(voxel_leaf_size_, map_r_decay_coeff_);
     }
 
-    // 点云回调函数：接收 → 累加 → 降采样 → ROI过滤 → 膨胀 → 腐蚀 → 投影 → 发布
-    // void cloudCallback(const sensor_msgs::PointCloud2ConstPtr &cloud_msg) {
     void cloudCallback(const livox_ros_driver2::CustomMsg::Ptr &livox_msg) {
-        // 1. ROS转PCL点云
-        // pcl::fromROSMsg(*cloud_msg, *raw_livox_cloud_);
-        if (nh_.getParam("/pcl_enable", pcl_enable_)) {
-            if (!pcl_enable_) {
-                ROS_INFO_THROTTLE(1, "等待pcl启动中");
-                return;
-            }
+        if (nh_.getParam("/pcl_enable", pcl_enable_) && !pcl_enable_) {
+            ROS_INFO_THROTTLE(1, "等待pcl启动中");
+            return;
         }
 
         if (!pcl_detection2::adapters::LivoxConverter<PointT>::convert(
                 livox_msg, raw_livox_cloud_, map_tf_ini_intensity_, livox_roi_uav_radius_,
                 livox_roi_max_coord_, livox_roi_debug_level_))
         {
-            ROS_WARN("转换点云失败");
+            ROS_WARN_THROTTLE(1, "转换点云失败");
             return;
         }
 
         if (raw_livox_cloud_->empty()) {
-            ROS_WARN("接收到空点云，跳过积累");
+            ROS_WARN_THROTTLE(1, "接收到空点云，跳过本次更新");
             return;
         }
-        ROS_INFO_THROTTLE(1, "[积累] 接收新点云：%zu 个点", raw_livox_cloud_->size());
 
-        // 初次降采样：使用 AVERAGE 模式
         voxel_filter_->filterCloud(raw_livox_cloud_, downsampled_livox_cloud_,
                                    VoxelFilterT::Mode::AVERAGE);
-
-        Eigen::Affine3f transform;
-        if (!tf_adapter_.get_transform(transform)) {
-            ROS_WARN_THROTTLE(1.0, "里程计无消息，等待中");
+        if (downsampled_livox_cloud_->empty()) {
+            ROS_WARN_THROTTLE(1, "降采样后为空，跳过本次更新");
             return;
         }
-        pcl::transformPointCloud(*downsampled_livox_cloud_, *tf_livox_cloud_, transform);
 
-        if (roi_filtered_cloud_->empty()) {
-            ROS_WARN("首次点云，跳过配准");
+        Eigen::Matrix4f odom_pose = Eigen::Matrix4f::Identity();
+        if (!tf_adapter_.get_transform_matrix(odom_pose)) {
+            ROS_WARN_THROTTLE(1, "里程计无消息，等待中");
+            return;
+        }
+
+        if (!pose_initialized_) {
+            last_odom_pose_ = odom_pose;
+            last_map_pose_  = Eigen::Matrix4f::Identity();
+            pcl::transformPointCloud(*downsampled_livox_cloud_, *aligned_livox_cloud_,
+                                     last_map_pose_);
+            pose_initialized_ = true;
+            ROS_INFO("初始化局部地图，首帧直接写入地图窗口");
         }
         else {
-            pcl::transformPointCloud(
-                *roi_filtered_cloud_, *register_map_cloud_,
-                register_->registerSourceToTarget(roi_filtered_cloud_, tf_livox_cloud_));
+            const Eigen::Matrix4f odom_delta = last_odom_pose_.inverse() * odom_pose;
+            const Eigen::Matrix4f predicted_pose = last_map_pose_ * odom_delta;
+
+            pcl::transformPointCloud(*downsampled_livox_cloud_, *predicted_livox_cloud_,
+                                     predicted_pose);
+
+            bool registration_accepted = false;
+            if (!downsampled_local_map_cloud_->empty()) {
+                const auto registration_result = register_->registerSourceToTarget(
+                    downsampled_livox_cloud_, downsampled_local_map_cloud_, predicted_pose);
+
+                const Eigen::Matrix4f correction_delta =
+                    predicted_pose.inverse() * registration_result.final_transform;
+                const float translation_delta = correction_delta.block<3, 1>(0, 3).norm();
+                const float rotation_delta_deg = rotationDeltaDeg(correction_delta);
+
+                registration_accepted = registration_result.converged &&
+                                        registration_result.fitness_score <=
+                                            register_max_fitness_score_ &&
+                                        translation_delta <= register_max_translation_delta_ &&
+                                        rotation_delta_deg <= register_max_rotation_delta_deg_;
+
+                if (registration_accepted) {
+                    *aligned_livox_cloud_ = *registration_result.aligned_cloud;
+                    last_map_pose_        = registration_result.final_transform;
+                }
+                else {
+                    *aligned_livox_cloud_ = *predicted_livox_cloud_;
+                    last_map_pose_        = predicted_pose;
+                    ROS_WARN_THROTTLE(
+                        1,
+                        "ICP回退预测值: converged=%d fitness=%.4f delta_t=%.3f delta_r=%.2fdeg",
+                        registration_result.converged, registration_result.fitness_score,
+                        translation_delta, rotation_delta_deg);
+                }
+            }
+            else {
+                *aligned_livox_cloud_ = *predicted_livox_cloud_;
+                last_map_pose_        = predicted_pose;
+                ROS_WARN_THROTTLE(1, "局部地图为空，使用里程计预测位姿");
+            }
+
+            if (registration_accepted) {
+                ROS_INFO_THROTTLE(1, "ICP修正已接受，局部地图点数: %zu",
+                                  downsampled_local_map_cloud_->size());
+            }
         }
 
-        // *raw_accumulated_cloud_ = *downsampled_accumulated_cloud_ + *tf_livox_cloud_;
-        *register_map_cloud_ += *tf_livox_cloud_;
+        last_odom_pose_ = odom_pose;
 
-        /***********template 2**************/
+        updateLocalMap(aligned_livox_cloud_);
+        updateObstacleCloud();
 
-        // 积累后降采样：使用 ACCUMULATE 模式
-        voxel_filter_->filterCloud(register_map_cloud_, downsampled_accumulated_cloud_,
-                                   VoxelFilterT::Mode::ACCUMULATE);
-
-        /***********************************/
-
-        // ROI区域过滤
-        crop_box_->filterROI(downsampled_accumulated_cloud_, roi_filtered_cloud_);
-
-        // 点云腐蚀处理
-        erodePointCloud(roi_filtered_cloud_, eroded_cloud_);
-
-        // 点云膨胀处理
-        dilatePointCloud(eroded_cloud_, dilated_cloud_);
-
-        // 点云平面投影处理
-        projectPointCloud(dilated_cloud_, projected_cloud_);
-
-        // 8. 发布各类点云
         publishAccumulatedCloud(livox_msg->header);
         publishRawLivoxCloud(livox_msg->header);
         publishDownsampledCloud(livox_msg->header);
         publishROIFilteredCloud(livox_msg->header);
         publishDilatedCloud(livox_msg->header);
         publishErodedCloud(livox_msg->header);
-        publishProjectedCloud(livox_msg->header);  // 新增：发布投影后点云
+        publishProjectedCloud(livox_msg->header);
     }
 
   private:
-    // 点云膨胀核心函数
+    static float rotationDeltaDeg(const Eigen::Matrix4f &transform) {
+        const float trace = transform.block<3, 3>(0, 0).trace();
+        const float cos_theta = std::max(-1.0f, std::min(1.0f, (trace - 1.0f) * 0.5f));
+        return std::acos(cos_theta) * 180.0f / static_cast<float>(M_PI);
+    }
+
+    void updateLocalMap(const PointCloudPtrT &aligned_cloud) {
+        if (!aligned_cloud || aligned_cloud->empty()) return;
+
+        local_map_frames_.emplace_back(new PointCloudT(*aligned_cloud));
+        while (local_map_frames_.size() > static_cast<size_t>(local_map_frame_num_)) {
+            local_map_frames_.pop_front();
+        }
+
+        local_map_cloud_->clear();
+        for (const auto &frame : local_map_frames_) {
+            *local_map_cloud_ += *frame;
+        }
+
+        voxel_filter_->filterCloud(local_map_cloud_, downsampled_local_map_cloud_,
+                                   VoxelFilterT::Mode::ACCUMULATE);
+    }
+
+    void updateObstacleCloud() {
+        roi_filtered_cloud_->clear();
+        eroded_cloud_->clear();
+        dilated_cloud_->clear();
+        projected_cloud_->clear();
+
+        if (downsampled_local_map_cloud_->empty()) return;
+
+        crop_box_->filterROI(downsampled_local_map_cloud_, roi_filtered_cloud_);
+        erodePointCloud(roi_filtered_cloud_, eroded_cloud_);
+        dilatePointCloud(eroded_cloud_, dilated_cloud_);
+        projectPointCloud(dilated_cloud_, projected_cloud_);
+    }
+
     void dilatePointCloud(PointCloudPtrT input, PointCloudPtrT output) {
-        // float resolution = 0.05f;
-        // float radius     = 0.15f;
         output->clear();
         if (input->empty()) return;
 
-        static PointCloudPtrT temppc(new PointCloudT);
-        temppc->clear();
-        const float deta_round = 3 * M_PI / dilation_steps_;
-        const float deta_above = M_PI / dilation_steps_;
-        for (auto &point : input->points) {
+        PointCloudPtrT temp_cloud(new PointCloudT);
+        const float delta_round = 3.0f * static_cast<float>(M_PI) / dilation_steps_;
+        const float delta_above = static_cast<float>(M_PI) / dilation_steps_;
+
+        for (const auto &point : input->points) {
             for (int i = 0; i < dilation_steps_; ++i) {
-                float delta = i * deta_round;
-                for (int j = 0; j < dilation_steps_; j++) {
-                    float delta_z = j * deta_above;
+                const float delta = i * delta_round;
+                for (int j = 0; j < dilation_steps_; ++j) {
+                    const float delta_z = j * delta_above;
                     PointT dilated_point;
                     pcl::copyPoint(point, dilated_point);
-                    dilated_point.x = point.x + dilation_radius_ * cos(delta) * cos(delta_z);
-                    dilated_point.y = point.y + dilation_radius_ * sin(delta) * cos(delta_z);
-                    dilated_point.z = point.z + dilation_radius_ * sin(delta_z);
-                    temppc->push_back(dilated_point);
+                    dilated_point.x = point.x + dilation_radius_ * std::cos(delta) * std::cos(delta_z);
+                    dilated_point.y = point.y + dilation_radius_ * std::sin(delta) * std::cos(delta_z);
+                    dilated_point.z = point.z + dilation_radius_ * std::sin(delta_z);
+                    temp_cloud->push_back(dilated_point);
                 }
             }
         }
-        // 膨胀后降采样：使用 MAX 模式
-        voxel_filter_->filterCloud(temppc, output, VoxelFilterT::Mode::MAX);
+
+        voxel_filter_->filterCloud(temp_cloud, output, VoxelFilterT::Mode::MAX);
     }
 
-    // 点云腐蚀核心函数
     void erodePointCloud(PointCloudPtrT input, PointCloudPtrT output) {
         output->clear();
         if (input->empty()) return;
 
-        pcl::StatisticalOutlierRemoval<PointT> sorfilter;
-        sorfilter.setInputCloud(input);
-        sorfilter.setMeanK(erosion_mean_k_);
-        sorfilter.setStddevMulThresh(erosion_thresh_);
-        sorfilter.filter(*output);
+        pcl::StatisticalOutlierRemoval<PointT> sor_filter;
+        sor_filter.setInputCloud(input);
+        sor_filter.setMeanK(erosion_mean_k_);
+        sor_filter.setStddevMulThresh(erosion_thresh_);
+        sor_filter.filter(*output);
     }
 
-    // 新增：点云平面投影核心函数（默认投影到Z=projection_plane_z_平面）
     void projectPointCloud(PointCloudPtrT input, PointCloudPtrT output) {
         output->clear();
         if (input->empty()) return;
 
         pcl::ModelCoefficients::Ptr ground(new pcl::ModelCoefficients);
-        ground->values = {0.0, 0.0, 1.0, -projection_plane_z_};  // [a,b,c,d]
+        ground->values = {0.0, 0.0, 1.0, -projection_plane_z_};
 
         pcl::ProjectInliers<PointT> proj;
         proj.setModelType(pcl::SACMODEL_PLANE);
         proj.setInputCloud(input);
         proj.setModelCoefficients(ground);
-        proj.setCopyAllData(false);  // 仅输出投影后的内点
+        proj.setCopyAllData(false);
         proj.filter(*output);
     }
 
-    // 发布带颜色点云工具函数
-    //  void toMsgColor(pcl::PointCloud)
-
-    // 发布原始积累点云
     void publishAccumulatedCloud(const std_msgs::Header &header) {
-        if (raw_accumulated_cloud_->empty()) return;
+        if (local_map_cloud_->empty()) return;
         sensor_msgs::PointCloud2 output_msg;
-        pcl::toROSMsg(*raw_accumulated_cloud_, output_msg);
+        pcl::toROSMsg(*local_map_cloud_, output_msg);
         output_msg.header = header;
         accumulated_cloud_pub_.publish(output_msg);
     }
 
-
-    // 发布原始livox点云
     void publishRawLivoxCloud(const std_msgs::Header &header) {
         if (raw_livox_cloud_->empty()) return;
         sensor_msgs::PointCloud2 output_msg;
@@ -272,16 +314,14 @@ class CloudAccumulator
         raw_livox_cloud_pub_.publish(output_msg);
     }
 
-    // 发布降采样后点云
     void publishDownsampledCloud(const std_msgs::Header &header) {
-        if (downsampled_accumulated_cloud_->empty()) return;
+        if (downsampled_local_map_cloud_->empty()) return;
         sensor_msgs::PointCloud2 output_msg;
-        pcl::toROSMsg(*downsampled_accumulated_cloud_, output_msg);
+        pcl::toROSMsg(*downsampled_local_map_cloud_, output_msg);
         output_msg.header = header;
         downsampled_cloud_pub_.publish(output_msg);
     }
 
-    // 发布ROI过滤后点云
     void publishROIFilteredCloud(const std_msgs::Header &header) {
         if (roi_filtered_cloud_->empty()) return;
         sensor_msgs::PointCloud2 output_msg;
@@ -290,7 +330,6 @@ class CloudAccumulator
         roi_filtered_pub_.publish(output_msg);
     }
 
-    // 发布膨胀后点云
     void publishDilatedCloud(const std_msgs::Header &header) {
         if (dilated_cloud_->empty()) return;
         sensor_msgs::PointCloud2 output_msg;
@@ -299,7 +338,6 @@ class CloudAccumulator
         dilated_cloud_pub_.publish(output_msg);
     }
 
-    // 发布腐蚀后点云
     void publishErodedCloud(const std_msgs::Header &header) {
         if (eroded_cloud_->empty()) return;
         sensor_msgs::PointCloud2 output_msg;
@@ -308,7 +346,6 @@ class CloudAccumulator
         eroded_cloud_pub_.publish(output_msg);
     }
 
-    // 新增：发布投影后点云
     void publishProjectedCloud(const std_msgs::Header &header) {
         if (projected_cloud_->empty()) return;
         sensor_msgs::PointCloud2 output_msg;
@@ -330,59 +367,59 @@ class CloudAccumulator
     ros::Publisher roi_filtered_pub_;
     ros::Publisher dilated_cloud_pub_;
     ros::Publisher eroded_cloud_pub_;
-    ros::Publisher projected_cloud_pub_;  // 新增：投影点云发布器
+    ros::Publisher projected_cloud_pub_;
 
     pcl_detection2::adapters::PcTfMatrix tf_adapter_;
     std::unique_ptr<pcl_detection2::core::CropBoxRoi<PointT>> crop_box_;
-    std::unique_ptr<pcl_detection2::core::Register<PointT>> register_;
-    std::unique_ptr<pcl_detection2::core::VoxelGridUnified<PointT>> voxel_filter_;
+    std::unique_ptr<RegisterT> register_;
+    std::unique_ptr<VoxelFilterT> voxel_filter_;
 
-    // 点云容器（六级处理：原始 → 降采样 → ROI过滤 → 膨胀 → 腐蚀 → 投影）
     PointCloudPtrT raw_livox_cloud_;
     PointCloudPtrT downsampled_livox_cloud_;
-    PointCloudPtrT tf_livox_cloud_;
-    PointCloudPtrT register_map_cloud_;
-    PointCloudPtrT raw_accumulated_cloud_;
-    PointCloudPtrT downsampled_accumulated_cloud_;
+    PointCloudPtrT predicted_livox_cloud_;
+    PointCloudPtrT aligned_livox_cloud_;
+    PointCloudPtrT local_map_cloud_;
+    PointCloudPtrT downsampled_local_map_cloud_;
     PointCloudPtrT roi_filtered_cloud_;
-    PointCloudPtrT dilated_cloud_;
     PointCloudPtrT eroded_cloud_;
-    PointCloudPtrT projected_cloud_;  // 新增：投影后点云
+    PointCloudPtrT dilated_cloud_;
+    PointCloudPtrT projected_cloud_;
+    std::deque<PointCloudPtrT> local_map_frames_;
 
-    // 参数
-    // 启用参数
+    bool pose_initialized_ = false;
+    Eigen::Matrix4f last_odom_pose_ = Eigen::Matrix4f::Identity();
+    Eigen::Matrix4f last_map_pose_  = Eigen::Matrix4f::Identity();
+
     bool pcl_enable_;
-    // livox ROI参数
     float livox_roi_uav_radius_;
     float livox_roi_max_coord_;
     int livox_roi_debug_level_;
-    // 降采样参数
     double voxel_leaf_size_;
-    // 地图积累参数
     float map_decay_coeff_;
     float map_r_decay_coeff_;
     float map_ini_intensity_;
     float map_tf_ini_intensity_;
-    // 配准参数
+    int local_map_frame_num_;
     float register_max_correspondence_distance_;
     int register_max_iter_;
     float register_transformation_epsilon_;
     float register_euclidean_fitness_epsilon_;
-    // ROI参数
-    float roi_x_min_, roi_x_max_;
-    float roi_y_min_, roi_y_max_;
-    float roi_z_min_, roi_z_max_;
-    // 膨胀参数
+    float register_max_fitness_score_;
+    float register_max_translation_delta_;
+    float register_max_rotation_delta_deg_;
+    float roi_x_min_;
+    float roi_x_max_;
+    float roi_y_min_;
+    float roi_y_max_;
+    float roi_z_min_;
+    float roi_z_max_;
     double dilation_radius_;
     int dilation_steps_;
-    // 腐蚀参数
     int erosion_mean_k_;
     double erosion_thresh_;
-    // 新增：投影参数
-    float projection_plane_z_;  // 投影平面的Z坐标（默认Z=0，地面平面）
+    float projection_plane_z_;
 };
 
-// 主函数
 int main(int argc, char **argv) {
     setlocale(LC_ALL, "");
     ros::init(argc, argv, "cloud_template_node");

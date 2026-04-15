@@ -5,6 +5,7 @@
 #include <ros/ros.h>
 
 #include <Eigen/Dense>
+#include <mutex>
 
 namespace pcl_detection2
 {
@@ -13,6 +14,18 @@ namespace adapters
 class PcTfMatrix
 {
   public:
+    static Eigen::Matrix4f poseToMatrix(const geometry_msgs::Pose &pose) {
+        Eigen::Matrix4f transform = Eigen::Matrix4f::Identity();
+        transform.block<3, 3>(0, 0) =
+            Eigen::Quaternionf(pose.orientation.w, pose.orientation.x, pose.orientation.y,
+                               pose.orientation.z)
+                .toRotationMatrix();
+        transform(0, 3) = pose.position.x;
+        transform(1, 3) = pose.position.y;
+        transform(2, 3) = pose.position.z;
+        return transform;
+    }
+
     /**
      * @brief 获取无人机的位姿矩阵
      */
@@ -21,13 +34,16 @@ class PcTfMatrix
         if (!lastest_msg_) return false;
 
         transform = Eigen::Affine3f::Identity();
-        transform.translation() << lastest_msg_->pose.position.x, lastest_msg_->pose.position.y,
-            lastest_msg_->pose.position.z;
-        transform.linear() =
-            Eigen::Quaternionf(lastest_msg_->pose.orientation.w, lastest_msg_->pose.orientation.x,
-                               lastest_msg_->pose.orientation.y, lastest_msg_->pose.orientation.z)
-                .toRotationMatrix();
+        transform.matrix() = poseToMatrix(lastest_msg_->pose);
 
+        return true;
+    }
+
+    bool get_transform_matrix(Eigen::Matrix4f &transform) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!lastest_msg_) return false;
+
+        transform = poseToMatrix(lastest_msg_->pose);
         return true;
     }
 
