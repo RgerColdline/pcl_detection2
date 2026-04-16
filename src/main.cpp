@@ -81,6 +81,8 @@ class CloudAccumulator
         downsampled_livox_cloud_.reset(new PointCloudT);
         predicted_livox_cloud_.reset(new PointCloudT);
         aligned_livox_cloud_.reset(new PointCloudT);
+        registration_map_cloud_.reset(new PointCloudT);
+        downsampled_registration_map_cloud_.reset(new PointCloudT);
         local_map_cloud_.reset(new PointCloudT);
         downsampled_local_map_cloud_.reset(new PointCloudT);
         roi_filtered_cloud_.reset(new PointCloudT);
@@ -97,6 +99,8 @@ class CloudAccumulator
             nh_.advertise<sensor_msgs::PointCloud2>("/pcl_detection2/accumulated_cloud", 1);
         raw_livox_cloud_pub_ =
             nh_.advertise<sensor_msgs::PointCloud2>("/pcl_detection2/raw_livox_cloud", 1);
+        registration_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
+            "/pcl_detection2/registration_map_cloud", 1);
         downsampled_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
             "/pcl_detection2/downsampled_accumulated_cloud", 1);
         roi_filtered_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
@@ -122,6 +126,7 @@ class CloudAccumulator
         map_r_decay_coeff_ = 1.0f - map_decay_coeff_;
         pnh_.param("map/ini_intensity", map_ini_intensity_, 50.0f);
         map_tf_ini_intensity_ = map_ini_intensity_ / map_r_decay_coeff_ / 100.0f;
+        pnh_.param("map/registration_frame_num", registration_frame_num_, 5);
         pnh_.param("map/local_frame_num", local_map_frame_num_, 15);
         pnh_.param("map/rebuild_every_n_frames", map_rebuild_every_n_frames_, 5);
 
@@ -215,9 +220,9 @@ class CloudAccumulator
             if (timing_enable_) timing.mark("predict");
 
             bool registration_accepted = false;
-            if (!downsampled_local_map_cloud_->empty()) {
+            if (!downsampled_registration_map_cloud_->empty()) {
                 const auto registration_result = register_->registerSourceToTarget(
-                    downsampled_livox_cloud_, downsampled_local_map_cloud_, predicted_pose);
+                    downsampled_livox_cloud_, downsampled_registration_map_cloud_, predicted_pose);
 
                 const Eigen::Matrix4f correction_delta =
                     predicted_pose.inverse() * registration_result.final_transform;
@@ -251,13 +256,15 @@ class CloudAccumulator
 
             if (registration_accepted) {
                 ROS_INFO_THROTTLE(1, "ICP修正已接受，局部地图点数: %zu",
-                                  downsampled_local_map_cloud_->size());
+                                  downsampled_registration_map_cloud_->size());
             }
             if (timing_enable_) timing.mark("register");
         }
 
         last_odom_pose_ = odom_pose;
 
+        updateRegistrationMap(aligned_livox_cloud_);
+        if (timing_enable_) timing.mark("registration_map");
         updateLocalMap(aligned_livox_cloud_);
         if (timing_enable_) timing.mark("local_map");
         updateObstacleCloud();
@@ -265,6 +272,7 @@ class CloudAccumulator
 
         publishAccumulatedCloud(livox_msg->header);
         publishRawLivoxCloud(livox_msg->header);
+        publishRegistrationMap(livox_msg->header);
         publishDownsampledCloud(livox_msg->header);
         publishROIFilteredCloud(livox_msg->header);
         publishDilatedCloud(livox_msg->header);
@@ -333,6 +341,23 @@ class CloudAccumulator
                                    VoxelFilterT::Mode::ACCUMULATE);
     }
 
+    void updateRegistrationMap(const PointCloudPtrT &aligned_cloud) {
+        if (!aligned_cloud || aligned_cloud->empty()) return;
+
+        registration_map_frames_.emplace_back(new PointCloudT(*aligned_cloud));
+        while (registration_map_frames_.size() > static_cast<size_t>(registration_frame_num_)) {
+            registration_map_frames_.pop_front();
+        }
+
+        registration_map_cloud_->clear();
+        for (const auto &frame : registration_map_frames_) {
+            *registration_map_cloud_ += *frame;
+        }
+
+        voxel_filter_->filterCloud(registration_map_cloud_, downsampled_registration_map_cloud_,
+                                   VoxelFilterT::Mode::ACCUMULATE);
+    }
+
     void updateObstacleCloud() {
         roi_filtered_cloud_->clear();
         eroded_cloud_->clear();
@@ -352,6 +377,10 @@ class CloudAccumulator
     void dilatePointCloud(PointCloudPtrT input, PointCloudPtrT output) {
         output->clear();
         if (input->empty()) return;
+        if (dilation_radius_ <= 0.0) {
+            *output = *input;
+            return;
+        }
 
         PointCloudPtrT temp_cloud(new PointCloudT);
         const float delta_round = 3.0f * static_cast<float>(M_PI) / dilation_steps_;
@@ -427,6 +456,14 @@ class CloudAccumulator
         downsampled_cloud_pub_.publish(output_msg);
     }
 
+    void publishRegistrationMap(const std_msgs::Header &header) {
+        if (downsampled_registration_map_cloud_->empty()) return;
+        sensor_msgs::PointCloud2 output_msg;
+        pcl::toROSMsg(*downsampled_registration_map_cloud_, output_msg);
+        output_msg.header = header;
+        registration_map_pub_.publish(output_msg);
+    }
+
     void publishROIFilteredCloud(const std_msgs::Header &header) {
         if (roi_filtered_cloud_->empty()) return;
         sensor_msgs::PointCloud2 output_msg;
@@ -469,6 +506,7 @@ class CloudAccumulator
     ros::Subscriber odometry_sub_;
     ros::Publisher accumulated_cloud_pub_;
     ros::Publisher raw_livox_cloud_pub_;
+    ros::Publisher registration_map_pub_;
     ros::Publisher downsampled_cloud_pub_;
     ros::Publisher roi_filtered_pub_;
     ros::Publisher dilated_cloud_pub_;
@@ -484,12 +522,15 @@ class CloudAccumulator
     PointCloudPtrT downsampled_livox_cloud_;
     PointCloudPtrT predicted_livox_cloud_;
     PointCloudPtrT aligned_livox_cloud_;
+    PointCloudPtrT registration_map_cloud_;
+    PointCloudPtrT downsampled_registration_map_cloud_;
     PointCloudPtrT local_map_cloud_;
     PointCloudPtrT downsampled_local_map_cloud_;
     PointCloudPtrT roi_filtered_cloud_;
     PointCloudPtrT eroded_cloud_;
     PointCloudPtrT dilated_cloud_;
     PointCloudPtrT projected_cloud_;
+    std::deque<PointCloudPtrT> registration_map_frames_;
     std::deque<PointCloudPtrT> local_map_frames_;
 
     bool pose_initialized_          = false;
@@ -507,6 +548,7 @@ class CloudAccumulator
     float map_r_decay_coeff_;
     float map_ini_intensity_;
     float map_tf_ini_intensity_;
+    int registration_frame_num_;
     int local_map_frame_num_;
     int map_rebuild_every_n_frames_;
     int frames_since_map_rebuild_ = 0;

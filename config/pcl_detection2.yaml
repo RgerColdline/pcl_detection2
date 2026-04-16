@@ -14,6 +14,7 @@ voxel:
 map:
   decay_coeff: 0.1
   ini_intensity: 50
+  registration_frame_num: 5
   local_frame_num: 15
   rebuild_every_n_frames: 5
 
