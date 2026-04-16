@@ -123,6 +123,7 @@ class CloudAccumulator
         pnh_.param("map/ini_intensity", map_ini_intensity_, 50.0f);
         map_tf_ini_intensity_ = map_ini_intensity_ / map_r_decay_coeff_ / 100.0f;
         pnh_.param("map/local_frame_num", local_map_frame_num_, 15);
+        pnh_.param("map/rebuild_every_n_frames", map_rebuild_every_n_frames_, 5);
 
         pnh_.param("register/max_correspondence_distance", register_max_correspondence_distance_,
                    0.5f);
@@ -315,6 +316,14 @@ class CloudAccumulator
             local_map_frames_.pop_front();
         }
 
+        ++frames_since_map_rebuild_;
+        if (frames_since_map_rebuild_ < map_rebuild_every_n_frames_ &&
+            !downsampled_local_map_cloud_->empty())
+        {
+            return;
+        }
+        frames_since_map_rebuild_ = 0;
+
         local_map_cloud_->clear();
         for (const auto &frame : local_map_frames_) {
             *local_map_cloud_ += *frame;
@@ -329,7 +338,6 @@ class CloudAccumulator
         eroded_cloud_->clear();
         if (dilation_radius_ > 0) {
             dilated_cloud_->clear();
-            ROS_INFO_STREAM_THROTTLE(1, "this did\n");
         }
         projected_cloud_->clear();
 
@@ -500,6 +508,8 @@ class CloudAccumulator
     float map_ini_intensity_;
     float map_tf_ini_intensity_;
     int local_map_frame_num_;
+    int map_rebuild_every_n_frames_;
+    int frames_since_map_rebuild_ = 0;
     float register_max_correspondence_distance_;
     int register_max_iter_;
     float register_transformation_epsilon_;
