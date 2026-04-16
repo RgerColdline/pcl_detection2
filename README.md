@@ -38,7 +38,7 @@ int main(int argc, char *argv[])
     ros::init(argc, argv, "test_pcl_msg_node");
     ros::NodeHandle nh;
 
-    auto pcl_sub = nh.subscribe("/projected_accumulated_cloud", 1, msg_cb);
+    auto pcl_sub = nh.subscribe("/pcl_detection2/projected_accumulated_cloud", 1, msg_cb);
 
     ros::spin();
 

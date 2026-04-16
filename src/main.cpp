@@ -43,17 +43,23 @@ class CloudAccumulator
             nh_.subscribe("/mavros/local_position/pose", 1,
                           &pcl_detection2::adapters::PcTfMatrix::odometry_cb, &tf_adapter_);
 
-        accumulated_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/accumulated_cloud", 1);
-        raw_livox_cloud_pub_   = nh_.advertise<sensor_msgs::PointCloud2>("/raw_livox_cloud", 1);
+        accumulated_cloud_pub_ =
+            nh_.advertise<sensor_msgs::PointCloud2>("/pcl_detection2/accumulated_cloud", 1);
+        raw_livox_cloud_pub_ =
+            nh_.advertise<sensor_msgs::PointCloud2>("/pcl_detection2/raw_livox_cloud", 1);
         downsampled_cloud_pub_ =
-            nh_.advertise<sensor_msgs::PointCloud2>("/downsampled_accumulated_cloud", 1);
+            nh_.advertise<sensor_msgs::PointCloud2>(
+                "/pcl_detection2/downsampled_accumulated_cloud", 1);
         roi_filtered_pub_ =
-            nh_.advertise<sensor_msgs::PointCloud2>("/roi_filtered_accumulated_cloud", 1);
+            nh_.advertise<sensor_msgs::PointCloud2>(
+                "/pcl_detection2/roi_filtered_accumulated_cloud", 1);
         dilated_cloud_pub_ =
-            nh_.advertise<sensor_msgs::PointCloud2>("/dilated_accumulated_cloud", 1);
-        eroded_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/eroded_accumulated_cloud", 1);
+            nh_.advertise<sensor_msgs::PointCloud2>("/pcl_detection2/dilated_accumulated_cloud", 1);
+        eroded_cloud_pub_ =
+            nh_.advertise<sensor_msgs::PointCloud2>("/pcl_detection2/eroded_accumulated_cloud", 1);
         projected_cloud_pub_ =
-            nh_.advertise<sensor_msgs::PointCloud2>("/projected_accumulated_cloud", 1);
+            nh_.advertise<sensor_msgs::PointCloud2>("/pcl_detection2/projected_accumulated_cloud",
+                                                    1);
 
         pnh_.param("initial_enable", pcl_enable_, false);
         nh_.setParam("/pcl_enable", pcl_enable_);
@@ -352,7 +358,8 @@ class CloudAccumulator
         pcl::toROSMsg(*projected_cloud_, output_msg);
         output_msg.header = header;
         projected_cloud_pub_.publish(output_msg);
-        ROS_INFO_THROTTLE(1, "[发布] 投影点云已发布到 /projected_accumulated_cloud，点数：%zu",
+        ROS_INFO_THROTTLE(1,
+                          "[发布] 投影点云已发布到 /pcl_detection2/projected_accumulated_cloud，点数：%zu",
                           projected_cloud_->size());
     }
 

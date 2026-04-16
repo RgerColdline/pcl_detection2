@@ -15,7 +15,7 @@ map:
 
 register:
   max_correspondence_distance: 0.3  # ICP最大对应点距离(m)，建议0.2~0.8，越小越严格，越大越易错配
-  max_iter: 50  # ICP最大迭代次数，建议20~80，越大越稳但更耗时
+  max_iter: 100  # ICP最大迭代次数，建议20~80，越大越稳但更耗时
   transformation_epsilon: 1e-8  # 变换收敛阈值，建议1e-9~1e-5，越小越严格
   euclidean_fitness_epsilon: 0.001  # fitness收敛阈值，建议1e-5~1e-2，越小越严格
   max_fitness_score: 0.2  # 接受本次ICP的最大fitness，建议0.05~0.5，越小越保守
@@ -29,7 +29,7 @@ roi:
   y_min: -1.0
   y_max: 3.9
   z_min: 0.3
-  z_max: 2.0
+  z_max: 1.5
 
 dilation:
   radius: 0
