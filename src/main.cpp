@@ -28,7 +28,8 @@ class CloudAccumulator
     using VoxelFilterT   = pcl_detection2::core::VoxelGridUnified<PointT>;
     using RegisterT      = pcl_detection2::core::Register<PointT>;
 
-    struct TimingReport {
+    struct TimingReport
+    {
         ros::WallTime last_tick = ros::WallTime::now();
         std::vector<std::pair<std::string, double>> stages_ms;
 
@@ -45,7 +46,8 @@ class CloudAccumulator
         }
     };
 
-    struct TimingSummary {
+    struct TimingSummary
+    {
         ros::WallTime window_start = ros::WallTime::now();
         std::vector<std::pair<std::string, double>> stage_sum_ms;
         int frame_count = 0;
@@ -95,19 +97,16 @@ class CloudAccumulator
             nh_.advertise<sensor_msgs::PointCloud2>("/pcl_detection2/accumulated_cloud", 1);
         raw_livox_cloud_pub_ =
             nh_.advertise<sensor_msgs::PointCloud2>("/pcl_detection2/raw_livox_cloud", 1);
-        downsampled_cloud_pub_ =
-            nh_.advertise<sensor_msgs::PointCloud2>(
-                "/pcl_detection2/downsampled_accumulated_cloud", 1);
-        roi_filtered_pub_ =
-            nh_.advertise<sensor_msgs::PointCloud2>(
-                "/pcl_detection2/roi_filtered_accumulated_cloud", 1);
+        downsampled_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
+            "/pcl_detection2/downsampled_accumulated_cloud", 1);
+        roi_filtered_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
+            "/pcl_detection2/roi_filtered_accumulated_cloud", 1);
         dilated_cloud_pub_ =
             nh_.advertise<sensor_msgs::PointCloud2>("/pcl_detection2/dilated_accumulated_cloud", 1);
         eroded_cloud_pub_ =
             nh_.advertise<sensor_msgs::PointCloud2>("/pcl_detection2/eroded_accumulated_cloud", 1);
-        projected_cloud_pub_ =
-            nh_.advertise<sensor_msgs::PointCloud2>("/pcl_detection2/projected_accumulated_cloud",
-                                                    1);
+        projected_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
+            "/pcl_detection2/projected_accumulated_cloud", 1);
 
         pnh_.param("initial_enable", pcl_enable_, false);
         nh_.setParam("/pcl_enable", pcl_enable_);
@@ -153,10 +152,9 @@ class CloudAccumulator
         crop_box_ = std::make_unique<pcl_detection2::core::CropBoxRoi<PointT>>(
             livox_roi_uav_radius_, roi_x_min_, roi_x_max_, roi_y_min_, roi_y_max_, roi_z_min_,
             roi_z_max_);
-        register_ = std::make_unique<RegisterT>(register_max_correspondence_distance_,
-                                                register_max_iter_,
-                                                register_transformation_epsilon_,
-                                                register_euclidean_fitness_epsilon_);
+        register_ = std::make_unique<RegisterT>(
+            register_max_correspondence_distance_, register_max_iter_,
+            register_transformation_epsilon_, register_euclidean_fitness_epsilon_);
         voxel_filter_ = std::make_unique<VoxelFilterT>(voxel_leaf_size_, map_r_decay_coeff_);
     }
 
@@ -208,7 +206,7 @@ class CloudAccumulator
             if (timing_enable_) timing.mark("predict");
         }
         else {
-            const Eigen::Matrix4f odom_delta = last_odom_pose_.inverse() * odom_pose;
+            const Eigen::Matrix4f odom_delta     = last_odom_pose_.inverse() * odom_pose;
             const Eigen::Matrix4f predicted_pose = last_map_pose_ * odom_delta;
 
             pcl::transformPointCloud(*downsampled_livox_cloud_, *predicted_livox_cloud_,
@@ -222,14 +220,14 @@ class CloudAccumulator
 
                 const Eigen::Matrix4f correction_delta =
                     predicted_pose.inverse() * registration_result.final_transform;
-                const float translation_delta = correction_delta.block<3, 1>(0, 3).norm();
+                const float translation_delta  = correction_delta.block<3, 1>(0, 3).norm();
                 const float rotation_delta_deg = rotationDeltaDeg(correction_delta);
 
-                registration_accepted = registration_result.converged &&
-                                        registration_result.fitness_score <=
-                                            register_max_fitness_score_ &&
-                                        translation_delta <= register_max_translation_delta_ &&
-                                        rotation_delta_deg <= register_max_rotation_delta_deg_;
+                registration_accepted =
+                    registration_result.converged &&
+                    registration_result.fitness_score <= register_max_fitness_score_ &&
+                    translation_delta <= register_max_translation_delta_ &&
+                    rotation_delta_deg <= register_max_rotation_delta_deg_;
 
                 if (registration_accepted) {
                     *aligned_livox_cloud_ = *registration_result.aligned_cloud;
@@ -239,8 +237,7 @@ class CloudAccumulator
                     *aligned_livox_cloud_ = *predicted_livox_cloud_;
                     last_map_pose_        = predicted_pose;
                     ROS_WARN_THROTTLE(
-                        1,
-                        "ICP回退预测值: converged=%d fitness=%.4f delta_t=%.3f delta_r=%.2fdeg",
+                        1, "ICP回退预测值: converged=%d fitness=%.4f delta_t=%.3f delta_r=%.2fdeg",
                         registration_result.converged, registration_result.fitness_score,
                         translation_delta, rotation_delta_deg);
                 }
@@ -280,7 +277,7 @@ class CloudAccumulator
 
   private:
     static float rotationDeltaDeg(const Eigen::Matrix4f &transform) {
-        const float trace = transform.block<3, 3>(0, 0).trace();
+        const float trace     = transform.block<3, 3>(0, 0).trace();
         const float cos_theta = std::max(-1.0f, std::min(1.0f, (trace - 1.0f) * 0.5f));
         return std::acos(cos_theta) * 180.0f / static_cast<float>(M_PI);
     }
@@ -292,18 +289,16 @@ class CloudAccumulator
         if (!timing_summary_.shouldFlush(now)) return;
 
         const double window_sec = (now - timing_summary_.window_start).toSec();
-        const double fps = window_sec > 0.0 ? timing_summary_.frame_count / window_sec : 0.0;
-        double total_ms = 0.0;
+        const double fps        = window_sec > 0.0 ? timing_summary_.frame_count / window_sec : 0.0;
+        double total_ms         = 0.0;
         std::ostringstream oss;
         oss.setf(std::ios::fixed);
         oss.precision(2);
         oss << "[pcl_timing]"
-            << " frames=" << timing_summary_.frame_count
-            << " fps=" << fps;
+            << " frames=" << timing_summary_.frame_count << " fps=" << fps;
         for (const auto &stage : timing_summary_.stage_sum_ms) {
-            const double avg_ms = timing_summary_.frame_count > 0
-                                      ? stage.second / timing_summary_.frame_count
-                                      : 0.0;
+            const double avg_ms =
+                timing_summary_.frame_count > 0 ? stage.second / timing_summary_.frame_count : 0.0;
             total_ms += avg_ms;
             oss << ' ' << stage.first << '=' << avg_ms << "ms";
         }
@@ -332,7 +327,7 @@ class CloudAccumulator
     void updateObstacleCloud() {
         roi_filtered_cloud_->clear();
         eroded_cloud_->clear();
-        dilated_cloud_->clear();
+        if (dilation_radius_ > 0) dilated_cloud_->clear();
         projected_cloud_->clear();
 
         if (downsampled_local_map_cloud_->empty()) return;
@@ -358,8 +353,10 @@ class CloudAccumulator
                     const float delta_z = j * delta_above;
                     PointT dilated_point;
                     pcl::copyPoint(point, dilated_point);
-                    dilated_point.x = point.x + dilation_radius_ * std::cos(delta) * std::cos(delta_z);
-                    dilated_point.y = point.y + dilation_radius_ * std::sin(delta) * std::cos(delta_z);
+                    dilated_point.x =
+                        point.x + dilation_radius_ * std::cos(delta) * std::cos(delta_z);
+                    dilated_point.y =
+                        point.y + dilation_radius_ * std::sin(delta) * std::cos(delta_z);
                     dilated_point.z = point.z + dilation_radius_ * std::sin(delta_z);
                     temp_cloud->push_back(dilated_point);
                 }
@@ -449,9 +446,9 @@ class CloudAccumulator
         pcl::toROSMsg(*projected_cloud_, output_msg);
         output_msg.header = header;
         projected_cloud_pub_.publish(output_msg);
-        ROS_INFO_THROTTLE(1,
-                          "[发布] 投影点云已发布到 /pcl_detection2/projected_accumulated_cloud，点数：%zu",
-                          projected_cloud_->size());
+        ROS_INFO_THROTTLE(
+            1, "[发布] 投影点云已发布到 /pcl_detection2/projected_accumulated_cloud，点数：%zu",
+            projected_cloud_->size());
     }
 
   private:
@@ -484,7 +481,7 @@ class CloudAccumulator
     PointCloudPtrT projected_cloud_;
     std::deque<PointCloudPtrT> local_map_frames_;
 
-    bool pose_initialized_ = false;
+    bool pose_initialized_          = false;
     Eigen::Matrix4f last_odom_pose_ = Eigen::Matrix4f::Identity();
     Eigen::Matrix4f last_map_pose_  = Eigen::Matrix4f::Identity();
 
