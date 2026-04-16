@@ -327,7 +327,10 @@ class CloudAccumulator
     void updateObstacleCloud() {
         roi_filtered_cloud_->clear();
         eroded_cloud_->clear();
-        if (dilation_radius_ > 0) dilated_cloud_->clear();
+        if (dilation_radius_ > 0) {
+            dilated_cloud_->clear();
+            ROS_INFO_STREAM_THROTTLE(1, "this did\n");
+        }
         projected_cloud_->clear();
 
         if (downsampled_local_map_cloud_->empty()) return;
