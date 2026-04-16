@@ -16,6 +16,8 @@
 
 #include <cmath>
 #include <deque>
+#include <sstream>
+#include <vector>
 
 class CloudAccumulator
 {
@@ -25,6 +27,52 @@ class CloudAccumulator
     using PointCloudPtrT = PointCloudT::Ptr;
     using VoxelFilterT   = pcl_detection2::core::VoxelGridUnified<PointT>;
     using RegisterT      = pcl_detection2::core::Register<PointT>;
+
+    struct TimingReport {
+        ros::WallTime last_tick = ros::WallTime::now();
+        std::vector<std::pair<std::string, double>> stages_ms;
+
+        void reset() {
+            last_tick = ros::WallTime::now();
+            stages_ms.clear();
+        }
+
+        void mark(const std::string &label) {
+            const ros::WallTime now = ros::WallTime::now();
+            const double elapsed_ms = (now - last_tick).toSec() * 1000.0;
+            stages_ms.emplace_back(label, elapsed_ms);
+            last_tick = now;
+        }
+    };
+
+    struct TimingSummary {
+        ros::WallTime window_start = ros::WallTime::now();
+        std::vector<std::pair<std::string, double>> stage_sum_ms;
+        int frame_count = 0;
+
+        void addFrame(const TimingReport &timing) {
+            if (stage_sum_ms.empty()) {
+                stage_sum_ms = timing.stages_ms;
+            }
+            else {
+                const std::size_t count = std::min(stage_sum_ms.size(), timing.stages_ms.size());
+                for (std::size_t i = 0; i < count; ++i) {
+                    stage_sum_ms[i].second += timing.stages_ms[i].second;
+                }
+            }
+            ++frame_count;
+        }
+
+        bool shouldFlush(const ros::WallTime &now) const {
+            return (now - window_start).toSec() >= 1.0;
+        }
+
+        void reset(const ros::WallTime &now) {
+            window_start = now;
+            stage_sum_ms.clear();
+            frame_count = 0;
+        }
+    };
 
     CloudAccumulator(ros::NodeHandle &nh, ros::NodeHandle &pnh) : nh_(nh), pnh_(pnh) {
         raw_livox_cloud_.reset(new PointCloudT);
@@ -63,6 +111,7 @@ class CloudAccumulator
 
         pnh_.param("initial_enable", pcl_enable_, false);
         nh_.setParam("/pcl_enable", pcl_enable_);
+        pnh_.param("debug/timing_enable", timing_enable_, false);
 
         pnh_.param("livox_roi/uav_radius", livox_roi_uav_radius_, 0.3f);
         pnh_.param("livox_roi/max_coord", livox_roi_max_coord_, 20.0f);
@@ -112,6 +161,9 @@ class CloudAccumulator
     }
 
     void cloudCallback(const livox_ros_driver2::CustomMsg::Ptr &livox_msg) {
+        TimingReport timing;
+        if (timing_enable_) timing.reset();
+
         if (nh_.getParam("/pcl_enable", pcl_enable_) && !pcl_enable_) {
             ROS_INFO_THROTTLE(1, "等待pcl启动中");
             return;
@@ -124,6 +176,7 @@ class CloudAccumulator
             ROS_WARN_THROTTLE(1, "转换点云失败");
             return;
         }
+        if (timing_enable_) timing.mark("convert");
 
         if (raw_livox_cloud_->empty()) {
             ROS_WARN_THROTTLE(1, "接收到空点云，跳过本次更新");
@@ -132,6 +185,7 @@ class CloudAccumulator
 
         voxel_filter_->filterCloud(raw_livox_cloud_, downsampled_livox_cloud_,
                                    VoxelFilterT::Mode::AVERAGE);
+        if (timing_enable_) timing.mark("downsample");
         if (downsampled_livox_cloud_->empty()) {
             ROS_WARN_THROTTLE(1, "降采样后为空，跳过本次更新");
             return;
@@ -142,6 +196,7 @@ class CloudAccumulator
             ROS_WARN_THROTTLE(1, "里程计无消息，等待中");
             return;
         }
+        if (timing_enable_) timing.mark("odom");
 
         if (!pose_initialized_) {
             last_odom_pose_ = odom_pose;
@@ -150,6 +205,7 @@ class CloudAccumulator
                                      last_map_pose_);
             pose_initialized_ = true;
             ROS_INFO("初始化局部地图，首帧直接写入地图窗口");
+            if (timing_enable_) timing.mark("predict");
         }
         else {
             const Eigen::Matrix4f odom_delta = last_odom_pose_.inverse() * odom_pose;
@@ -157,6 +213,7 @@ class CloudAccumulator
 
             pcl::transformPointCloud(*downsampled_livox_cloud_, *predicted_livox_cloud_,
                                      predicted_pose);
+            if (timing_enable_) timing.mark("predict");
 
             bool registration_accepted = false;
             if (!downsampled_local_map_cloud_->empty()) {
@@ -198,12 +255,15 @@ class CloudAccumulator
                 ROS_INFO_THROTTLE(1, "ICP修正已接受，局部地图点数: %zu",
                                   downsampled_local_map_cloud_->size());
             }
+            if (timing_enable_) timing.mark("register");
         }
 
         last_odom_pose_ = odom_pose;
 
         updateLocalMap(aligned_livox_cloud_);
+        if (timing_enable_) timing.mark("local_map");
         updateObstacleCloud();
+        if (timing_enable_) timing.mark("obstacle");
 
         publishAccumulatedCloud(livox_msg->header);
         publishRawLivoxCloud(livox_msg->header);
@@ -212,6 +272,10 @@ class CloudAccumulator
         publishDilatedCloud(livox_msg->header);
         publishErodedCloud(livox_msg->header);
         publishProjectedCloud(livox_msg->header);
+        if (timing_enable_) {
+            timing.mark("publish");
+            logTimingReport(timing);
+        }
     }
 
   private:
@@ -219,6 +283,33 @@ class CloudAccumulator
         const float trace = transform.block<3, 3>(0, 0).trace();
         const float cos_theta = std::max(-1.0f, std::min(1.0f, (trace - 1.0f) * 0.5f));
         return std::acos(cos_theta) * 180.0f / static_cast<float>(M_PI);
+    }
+
+    void logTimingReport(const TimingReport &timing) const {
+        timing_summary_.addFrame(timing);
+
+        const ros::WallTime now = ros::WallTime::now();
+        if (!timing_summary_.shouldFlush(now)) return;
+
+        const double window_sec = (now - timing_summary_.window_start).toSec();
+        const double fps = window_sec > 0.0 ? timing_summary_.frame_count / window_sec : 0.0;
+        double total_ms = 0.0;
+        std::ostringstream oss;
+        oss.setf(std::ios::fixed);
+        oss.precision(2);
+        oss << "[pcl_timing]"
+            << " frames=" << timing_summary_.frame_count
+            << " fps=" << fps;
+        for (const auto &stage : timing_summary_.stage_sum_ms) {
+            const double avg_ms = timing_summary_.frame_count > 0
+                                      ? stage.second / timing_summary_.frame_count
+                                      : 0.0;
+            total_ms += avg_ms;
+            oss << ' ' << stage.first << '=' << avg_ms << "ms";
+        }
+        oss << " total=" << total_ms << "ms";
+        ROS_INFO_STREAM(oss.str());
+        timing_summary_.reset(now);
     }
 
     void updateLocalMap(const PointCloudPtrT &aligned_cloud) {
@@ -398,6 +489,8 @@ class CloudAccumulator
     Eigen::Matrix4f last_map_pose_  = Eigen::Matrix4f::Identity();
 
     bool pcl_enable_;
+    bool timing_enable_;
+    mutable TimingSummary timing_summary_;
     float livox_roi_uav_radius_;
     float livox_roi_max_coord_;
     int livox_roi_debug_level_;

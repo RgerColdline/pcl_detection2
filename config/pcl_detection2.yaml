@@ -1,5 +1,8 @@
 initial_enable: false
 
+debug:
+  timing_enable: true
+
 livox_roi:
   uav_radius: 0.3
   max_coord: 20.0
