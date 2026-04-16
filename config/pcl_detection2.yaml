@@ -40,7 +40,7 @@ roi:
   z_max: 1.5
 
 dilation:
-  radius: 0
+  radius: 0.1
   steps: 12
 
 erosion:
