@@ -1,4 +1,4 @@
-initial_enable: false
+initial_enable: true
 
 debug:
   timing_enable: true
