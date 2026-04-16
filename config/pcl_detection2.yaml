@@ -26,6 +26,9 @@ register:
   max_fitness_score: 0.2  # 接受本次ICP的最大fitness，建议0.05~0.5，越小越保守
   max_translation_delta: 0.2  # 相对odom预测允许的最大平移修正(m)，建议0.1~1.0，比赛常用0.2~0.4
   max_rotation_delta_deg: 20.0  # 相对odom预测允许的最大旋转修正(deg)，建议5~30，比赛常用8~15
+  submap_x_radius: 3.0  # 配准子图x半径(m)，建议2~5，越小越局部
+  submap_y_radius: 3.0  # 配准子图y半径(m)，建议2~5，越小越局部
+  submap_z_radius: 1.5  # 配准子图z半径(m)，建议1~3，越小越局部
 
 roi:
   uav_radius: 0.3

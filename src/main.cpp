@@ -5,6 +5,7 @@
 #include "core/voxel.hpp"
 
 #include <pcl/common/transforms.h>
+#include <pcl/filters/crop_box.h>
 #include <pcl/filters/project_inliers.h>
 #include <pcl/filters/statistical_outlier_removal.h>
 #include <pcl/point_cloud.h>
@@ -83,6 +84,7 @@ class CloudAccumulator
         aligned_livox_cloud_.reset(new PointCloudT);
         registration_map_cloud_.reset(new PointCloudT);
         downsampled_registration_map_cloud_.reset(new PointCloudT);
+        registration_submap_cloud_.reset(new PointCloudT);
         local_map_cloud_.reset(new PointCloudT);
         downsampled_local_map_cloud_.reset(new PointCloudT);
         roi_filtered_cloud_.reset(new PointCloudT);
@@ -139,6 +141,9 @@ class CloudAccumulator
         pnh_.param("register/max_fitness_score", register_max_fitness_score_, 0.3f);
         pnh_.param("register/max_translation_delta", register_max_translation_delta_, 0.6f);
         pnh_.param("register/max_rotation_delta_deg", register_max_rotation_delta_deg_, 20.0f);
+        pnh_.param("register/submap_x_radius", register_submap_x_radius_, 3.0f);
+        pnh_.param("register/submap_y_radius", register_submap_y_radius_, 3.0f);
+        pnh_.param("register/submap_z_radius", register_submap_z_radius_, 1.5f);
 
         pnh_.param("roi/x_min", roi_x_min_, -0.5f);
         pnh_.param("roi/x_max", roi_x_max_, 4.5f);
@@ -221,8 +226,9 @@ class CloudAccumulator
 
             bool registration_accepted = false;
             if (!downsampled_registration_map_cloud_->empty()) {
+                buildRegistrationSubmap(predicted_pose);
                 const auto registration_result = register_->registerSourceToTarget(
-                    downsampled_livox_cloud_, downsampled_registration_map_cloud_, predicted_pose);
+                    downsampled_livox_cloud_, registrationSubmapForICP(), predicted_pose);
 
                 const Eigen::Matrix4f correction_delta =
                     predicted_pose.inverse() * registration_result.final_transform;
@@ -358,6 +364,32 @@ class CloudAccumulator
                                    VoxelFilterT::Mode::ACCUMULATE);
     }
 
+    PointCloudPtrT registrationSubmapForICP() const {
+        if (registration_submap_cloud_ && !registration_submap_cloud_->empty()) {
+            return registration_submap_cloud_;
+        }
+        return downsampled_registration_map_cloud_;
+    }
+
+    void buildRegistrationSubmap(const Eigen::Matrix4f &predicted_pose) {
+        registration_submap_cloud_->clear();
+        if (!downsampled_registration_map_cloud_ || downsampled_registration_map_cloud_->empty()) {
+            return;
+        }
+
+        pcl::CropBox<PointT> crop_box;
+        crop_box.setInputCloud(downsampled_registration_map_cloud_);
+
+        const Eigen::Vector3f center = predicted_pose.block<3, 1>(0, 3);
+        crop_box.setMin(Eigen::Vector4f(center.x() - register_submap_x_radius_,
+                                        center.y() - register_submap_y_radius_,
+                                        center.z() - register_submap_z_radius_, 1.0f));
+        crop_box.setMax(Eigen::Vector4f(center.x() + register_submap_x_radius_,
+                                        center.y() + register_submap_y_radius_,
+                                        center.z() + register_submap_z_radius_, 1.0f));
+        crop_box.filter(*registration_submap_cloud_);
+    }
+
     void updateObstacleCloud() {
         roi_filtered_cloud_->clear();
         eroded_cloud_->clear();
@@ -457,9 +489,9 @@ class CloudAccumulator
     }
 
     void publishRegistrationMap(const std_msgs::Header &header) {
-        if (downsampled_registration_map_cloud_->empty()) return;
+        if (registrationSubmapForICP()->empty()) return;
         sensor_msgs::PointCloud2 output_msg;
-        pcl::toROSMsg(*downsampled_registration_map_cloud_, output_msg);
+        pcl::toROSMsg(*registrationSubmapForICP(), output_msg);
         output_msg.header = header;
         registration_map_pub_.publish(output_msg);
     }
@@ -524,6 +556,7 @@ class CloudAccumulator
     PointCloudPtrT aligned_livox_cloud_;
     PointCloudPtrT registration_map_cloud_;
     PointCloudPtrT downsampled_registration_map_cloud_;
+    PointCloudPtrT registration_submap_cloud_;
     PointCloudPtrT local_map_cloud_;
     PointCloudPtrT downsampled_local_map_cloud_;
     PointCloudPtrT roi_filtered_cloud_;
@@ -559,6 +592,9 @@ class CloudAccumulator
     float register_max_fitness_score_;
     float register_max_translation_delta_;
     float register_max_rotation_delta_deg_;
+    float register_submap_x_radius_;
+    float register_submap_y_radius_;
+    float register_submap_z_radius_;
     float roi_x_min_;
     float roi_x_max_;
     float roi_y_min_;
