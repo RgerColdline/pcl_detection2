@@ -326,9 +326,9 @@ class CloudAccumulator
         if (!aligned_cloud || aligned_cloud->empty()) return;
 
         local_map_frames_.emplace_back(new PointCloudT(*aligned_cloud));
-        while (local_map_frames_.size() > static_cast<size_t>(local_map_frame_num_)) {
-            local_map_frames_.pop_front();
-        }
+        // while (local_map_frames_.size() > static_cast<size_t>(local_map_frame_num_)) {
+        //     local_map_frames_.pop_front();
+        // }
 
         ++frames_since_map_rebuild_;
         if (frames_since_map_rebuild_ < map_rebuild_every_n_frames_ &&
