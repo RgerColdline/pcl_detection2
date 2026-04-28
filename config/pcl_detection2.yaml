@@ -60,24 +60,24 @@ ring_pipeline:
 
 ring_plane:
   # ROI (平面提取前的裁剪范围，世界坐标系)
-  roi_x_min: -1.25
-  roi_x_max: 1.25
-  roi_y_min: -3.0
-  roi_y_max: -1.0
+  roi_x_min: -3.0
+  roi_x_max: -1.0
+  roi_y_min: -1.25
+  roi_y_max: 1.25
   roi_z_min: -0.15
   roi_z_max: 3.25
 
   # 欧式聚类
   cluster_tolerance: 0.05
   cluster_min_size: 100
-  cluster_max_size: 50000
+  cluster_max_size: 2000
 
   # RANSAC 平面拟合
   ransac_distance_threshold: 0.03
   ransac_min_inliers: 50
 
   # 平面筛选
-  min_plane_area_points: 500
+  min_plane_area_points: 300
   max_plane_vertical_angle: 30.0
 
   # 投影参数

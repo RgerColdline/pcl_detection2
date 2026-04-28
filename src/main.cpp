@@ -102,8 +102,8 @@ class CloudAccumulator
             nh_.advertise<sensor_msgs::PointCloud2>("/pcl_detection2/accumulated_cloud", 1);
         raw_livox_cloud_pub_ =
             nh_.advertise<sensor_msgs::PointCloud2>("/pcl_detection2/raw_livox_cloud", 1);
-        registration_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
-            "/pcl_detection2/registration_map_cloud", 1);
+        registration_map_pub_ =
+            nh_.advertise<sensor_msgs::PointCloud2>("/pcl_detection2/registration_map_cloud", 1);
         downsampled_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
             "/pcl_detection2/downsampled_accumulated_cloud", 1);
         roi_filtered_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
@@ -267,8 +267,7 @@ class CloudAccumulator
                 else {
                     *aligned_livox_cloud_ = *predicted_livox_cloud_;
                     last_map_pose_        = predicted_pose;
-                    ROS_WARN_THROTTLE(1,
-                                      "配准子图点数不足 (%zu < %d)，跳过ICP，使用里程计预测位姿",
+                    ROS_WARN_THROTTLE(1, "配准子图点数不足 (%zu < %d)，跳过ICP，使用里程计预测位姿",
                                       registrationSubmapForICP()->size(),
                                       register_min_submap_points_);
                 }
@@ -610,7 +609,7 @@ class CloudAccumulator
     int registration_frame_num_;
     int local_map_frame_num_;
     int map_rebuild_every_n_frames_;
-    int frames_since_map_rebuild_ = 0;
+    int frames_since_map_rebuild_  = 0;
     int ring_detect_frame_counter_ = 0;
     float register_max_correspondence_distance_;
     int register_max_iter_;

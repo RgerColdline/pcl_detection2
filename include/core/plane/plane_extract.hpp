@@ -10,7 +10,6 @@
 #include <pcl/sample_consensus/ransac.h>
 #include <pcl/segmentation/extract_clusters.h>
 #include <pcl/segmentation/sac_segmentation.h>
-
 #include <ros/ros.h>
 
 #include <Eigen/Dense>
@@ -39,7 +38,7 @@ class PlaneExtract
     using KdTreeT     = pcl::search::KdTree<PointT>;
     using KdTreePtrT  = typename KdTreeT::Ptr;
 
-    PlaneExtract() = default;
+    PlaneExtract()    = default;
 
     /**
      * @brief 从私有 nh 加载参数
@@ -79,7 +78,10 @@ class PlaneExtract
      */
     std::vector<PlaneParams> extract(const ConstPtr &input) {
         std::vector<PlaneParams> results;
-        if (!input || input->empty()) return results;
+        if (!input || input->empty()) {
+            ROS_DEBUG_THROTTLE(1.0, "[PlaneExtract] 输入点云为空");
+            return results;
+        }
 
         // ---- Step 1: ROI 裁剪 ----
         Ptr roi_cloud(new PointCloudT);
@@ -154,25 +156,25 @@ class PlaneExtract
             plane.coefficients = Eigen::Vector4f(coeffs.values[0], coeffs.values[1],
                                                  coeffs.values[2], coeffs.values[3]);
             plane.inliers.reset(new pcl::PointIndices(inlier_indices));
-            plane.cloud    = inlier_cloud;
-            plane.point_count = static_cast<int>(inlier_indices.indices.size());
+            plane.cloud          = inlier_cloud;
+            plane.point_count    = static_cast<int>(inlier_indices.indices.size());
 
             // 平面法向量
-            plane.normal = plane.coefficients.head<3>().normalized();
+            plane.normal         = plane.coefficients.head<3>().normalized();
 
             // 只保留近似竖直的平面（法向量接近水平）
             float vertical_angle = std::acos(std::abs(plane.normal.dot(Eigen::Vector3f::UnitZ())));
             vertical_angle       = vertical_angle * 180.0f / M_PI;
             if (std::abs(90.0f - vertical_angle) > max_plane_vertical_angle_) {
                 ROS_DEBUG("[PlaneExtract] 跳过非竖直平面，与竖直面夹角 %.1f° > %.1f°",
-                           std::abs(90.0f - vertical_angle), max_plane_vertical_angle_);
+                          std::abs(90.0f - vertical_angle), max_plane_vertical_angle_);
                 continue;
             }
 
             // 平面点数筛选
             if (plane.point_count < min_plane_area_points_) {
                 ROS_DEBUG("[PlaneExtract] 跳过小平面，点数 %d < %d", plane.point_count,
-                           min_plane_area_points_);
+                          min_plane_area_points_);
                 continue;
             }
 
@@ -199,17 +201,17 @@ class PlaneExtract
     float roi_z_min_ = 0.3f, roi_z_max_ = 2.0f;
 
     // 聚类参数
-    float cluster_tolerance_  = 0.05f;
-    int cluster_min_size_     = 100;
-    int cluster_max_size_     = 50000;
+    float cluster_tolerance_         = 0.05f;
+    int cluster_min_size_            = 100;
+    int cluster_max_size_            = 50000;
 
     // RANSAC 参数
     float ransac_distance_threshold_ = 0.03f;
     int ransac_min_inliers_          = 50;
 
     // 平面筛选
-    int min_plane_area_points_    = 500;
-    float max_plane_vertical_angle_ = 30.0f;
+    int min_plane_area_points_       = 500;
+    float max_plane_vertical_angle_  = 30.0f;
 
     KdTreePtrT kdtree_;
 };
