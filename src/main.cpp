@@ -3,6 +3,7 @@
 #include "core/register.hpp"
 #include "core/roi.hpp"
 #include "core/voxel.hpp"
+#include "pipeline/extract_square_ring.hpp"
 
 #include <pcl/common/transforms.h>
 #include <pcl/filters/crop_box.h>
@@ -144,6 +145,7 @@ class CloudAccumulator
         pnh_.param("register/submap_x_radius", register_submap_x_radius_, 3.0f);
         pnh_.param("register/submap_y_radius", register_submap_y_radius_, 3.0f);
         pnh_.param("register/submap_z_radius", register_submap_z_radius_, 1.5f);
+        pnh_.param("register/min_submap_points", register_min_submap_points_, 100);
 
         pnh_.param("roi/x_min", roi_x_min_, -0.5f);
         pnh_.param("roi/x_max", roi_x_max_, 4.5f);
@@ -167,6 +169,8 @@ class CloudAccumulator
             register_max_correspondence_distance_, register_max_iter_,
             register_transformation_epsilon_, register_euclidean_fitness_epsilon_);
         voxel_filter_ = std::make_unique<VoxelFilterT>(voxel_leaf_size_, map_r_decay_coeff_);
+
+        ring_extractor_.init(nh_, pnh_);
     }
 
     void cloudCallback(const livox_ros_driver2::CustomMsg::Ptr &livox_msg) {
@@ -227,31 +231,46 @@ class CloudAccumulator
             bool registration_accepted = false;
             if (!downsampled_registration_map_cloud_->empty()) {
                 buildRegistrationSubmap(predicted_pose);
-                const auto registration_result = register_->registerSourceToTarget(
-                    downsampled_livox_cloud_, registrationSubmapForICP(), predicted_pose);
 
-                const Eigen::Matrix4f correction_delta =
-                    predicted_pose.inverse() * registration_result.final_transform;
-                const float translation_delta  = correction_delta.block<3, 1>(0, 3).norm();
-                const float rotation_delta_deg = rotationDeltaDeg(correction_delta);
+                // 子图点数检查：点数不足时跳过 ICP，避免在无几何特征区域配歪
+                if (registrationSubmapForICP()->size() >=
+                    static_cast<size_t>(register_min_submap_points_))
+                {
+                    const auto registration_result = register_->registerSourceToTarget(
+                        downsampled_livox_cloud_, registrationSubmapForICP(), predicted_pose);
 
-                registration_accepted =
-                    registration_result.converged &&
-                    registration_result.fitness_score <= register_max_fitness_score_ &&
-                    translation_delta <= register_max_translation_delta_ &&
-                    rotation_delta_deg <= register_max_rotation_delta_deg_;
+                    const Eigen::Matrix4f correction_delta =
+                        predicted_pose.inverse() * registration_result.final_transform;
+                    const float translation_delta  = correction_delta.block<3, 1>(0, 3).norm();
+                    const float rotation_delta_deg = rotationDeltaDeg(correction_delta);
 
-                if (registration_accepted) {
-                    *aligned_livox_cloud_ = *registration_result.aligned_cloud;
-                    last_map_pose_        = registration_result.final_transform;
+                    registration_accepted =
+                        registration_result.converged &&
+                        registration_result.fitness_score <= register_max_fitness_score_ &&
+                        translation_delta <= register_max_translation_delta_ &&
+                        rotation_delta_deg <= register_max_rotation_delta_deg_;
+
+                    if (registration_accepted) {
+                        *aligned_livox_cloud_ = *registration_result.aligned_cloud;
+                        last_map_pose_        = registration_result.final_transform;
+                    }
+                    else {
+                        *aligned_livox_cloud_ = *predicted_livox_cloud_;
+                        last_map_pose_        = predicted_pose;
+                        ROS_WARN_THROTTLE(
+                            1,
+                            "ICP回退预测值: converged=%d fitness=%.4f delta_t=%.3f delta_r=%.2fdeg",
+                            registration_result.converged, registration_result.fitness_score,
+                            translation_delta, rotation_delta_deg);
+                    }
                 }
                 else {
                     *aligned_livox_cloud_ = *predicted_livox_cloud_;
                     last_map_pose_        = predicted_pose;
-                    ROS_WARN_THROTTLE(
-                        1, "ICP回退预测值: converged=%d fitness=%.4f delta_t=%.3f delta_r=%.2fdeg",
-                        registration_result.converged, registration_result.fitness_score,
-                        translation_delta, rotation_delta_deg);
+                    ROS_WARN_THROTTLE(1,
+                                      "配准子图点数不足 (%zu < %d)，跳过ICP，使用里程计预测位姿",
+                                      registrationSubmapForICP()->size(),
+                                      register_min_submap_points_);
                 }
             }
             else {
@@ -287,6 +306,12 @@ class CloudAccumulator
         if (timing_enable_) {
             timing.mark("publish");
             logTimingReport(timing);
+        }
+
+        // 方环检测 (每5帧运行一次以节省算力)
+        ++ring_detect_frame_counter_;
+        if (ring_detect_frame_counter_ % 5 == 0 && !downsampled_local_map_cloud_->empty()) {
+            ring_extractor_.processCloud(downsampled_local_map_cloud_);
         }
     }
 
@@ -549,6 +574,7 @@ class CloudAccumulator
     std::unique_ptr<pcl_detection2::core::CropBoxRoi<PointT>> crop_box_;
     std::unique_ptr<RegisterT> register_;
     std::unique_ptr<VoxelFilterT> voxel_filter_;
+    pcl_detection2::pipeline::ExtractSquareRing ring_extractor_;
 
     PointCloudPtrT raw_livox_cloud_;
     PointCloudPtrT downsampled_livox_cloud_;
@@ -585,6 +611,7 @@ class CloudAccumulator
     int local_map_frame_num_;
     int map_rebuild_every_n_frames_;
     int frames_since_map_rebuild_ = 0;
+    int ring_detect_frame_counter_ = 0;
     float register_max_correspondence_distance_;
     int register_max_iter_;
     float register_transformation_epsilon_;
@@ -595,6 +622,7 @@ class CloudAccumulator
     float register_submap_x_radius_;
     float register_submap_y_radius_;
     float register_submap_z_radius_;
+    int register_min_submap_points_;
     float roi_x_min_;
     float roi_x_max_;
     float roi_y_min_;

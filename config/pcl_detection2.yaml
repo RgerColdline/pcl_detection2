@@ -19,16 +19,17 @@ map:
   rebuild_every_n_frames: 5
 
 register:
-  max_correspondence_distance: 0.3  # ICP最大对应点距离(m)，建议0.2~0.8，越小越严格，越大越易错配
-  max_iter: 100  # ICP最大迭代次数，建议20~80，越大越稳但更耗时
-  transformation_epsilon: 1e-8  # 变换收敛阈值，建议1e-9~1e-5，越小越严格
-  euclidean_fitness_epsilon: 0.001  # fitness收敛阈值，建议1e-5~1e-2，越小越严格
-  max_fitness_score: 0.2  # 接受本次ICP的最大fitness，建议0.05~0.5，越小越保守
-  max_translation_delta: 0.2  # 相对odom预测允许的最大平移修正(m)，建议0.1~1.0，比赛常用0.2~0.4
-  max_rotation_delta_deg: 20.0  # 相对odom预测允许的最大旋转修正(deg)，建议5~30，比赛常用8~15
-  submap_x_radius: 3.0  # 配准子图x半径(m)，建议2~5，越小越局部
-  submap_y_radius: 3.0  # 配准子图y半径(m)，建议2~5，越小越局部
-  submap_z_radius: 1.5  # 配准子图z半径(m)，建议1~3，越小越局部
+  max_correspondence_distance: 0.3
+  max_iter: 100
+  transformation_epsilon: 1e-8
+  euclidean_fitness_epsilon: 0.001
+  max_fitness_score: 0.1
+  max_translation_delta: 0.15
+  max_rotation_delta_deg: 15.0
+  submap_x_radius: 3.0
+  submap_y_radius: 3.0
+  submap_z_radius: 1.5
+  min_submap_points: 100
 
 roi:
   uav_radius: 0.3
@@ -44,8 +45,79 @@ dilation:
   steps: 12
 
 erosion:
-  mean_k: 7 #越大过滤越狠
-  thresh: 0.8 #越小过滤越狠
+  mean_k: 7
+  thresh: 0.8
 
 projection:
   plane_z: 0.7
+
+# ==================== 方环检测 (穿环) ====================
+ring_pipeline:
+  enabled: true
+  input_cloud_topic: "/pcl_detection2/downsampled_accumulated_cloud"
+  publish_debug_cloud: true
+  max_planes: 2
+
+ring_plane:
+  # ROI (平面提取前的裁剪范围，世界坐标系)
+  roi_x_min: -1.25
+  roi_x_max: 1.25
+  roi_y_min: -3.0
+  roi_y_max: -1.0
+  roi_z_min: -0.15
+  roi_z_max: 3.25
+
+  # 欧式聚类
+  cluster_tolerance: 0.05
+  cluster_min_size: 100
+  cluster_max_size: 50000
+
+  # RANSAC 平面拟合
+  ransac_distance_threshold: 0.03
+  ransac_min_inliers: 50
+
+  # 平面筛选
+  min_plane_area_points: 500
+  max_plane_vertical_angle: 30.0
+
+  # 投影参数
+  projection_resolution: 0.05
+  projection_margin: 20
+
+ring_match:
+  # 模板图片路径列表 (YAML数组，顺序=优先级，高优先级先匹配)
+  # 相对路径会相对于 <pcl_detection2 包路径>/templates/ 解析
+  template_paths:
+    - "obs1.png"
+
+  # 单模板路径 (当 template_paths 为空时使用)
+  template_path: ""
+
+  # 每个模板的独立阈值 (可选，数量和 template_paths 一致)
+  # 不设置则统一使用 match_threshold
+  template_thresholds: []
+
+  match_threshold: 0.65
+  match_method: 5                        # TM_CCOEFF_NORMED
+
+  # 多尺度匹配参数 (±20%, 与参考实现一致)
+  scale_x_min: 0.8
+  scale_x_max: 1.2
+  scale_x_step: 0.05
+  scale_y_min: 0.8
+  scale_y_max: 1.2
+  scale_y_step: 0.05
+
+  # NMS
+  nms_iou_threshold: 0.3
+
+  # 形态学核大小 (填充稀疏LiDAR投影的缝隙)
+  morphology_kernel_size: 5
+
+  # 每张投影图最大检测环数
+  max_rings_per_image: 3
+
+  # 轮廓检测 fallback
+  expected_size_min: 20
+  expected_size_max: 200
+  contour_area_ratio_min: 0.3
