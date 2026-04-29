@@ -62,6 +62,7 @@ class PlaneExtract
         // --- RANSAC 参数 ---
         pnh_.param("ring_plane/ransac_distance_threshold", ransac_distance_threshold_, 0.03f);
         pnh_.param("ring_plane/ransac_min_inliers", ransac_min_inliers_, 50);
+        pnh_.param("ring_plane/max_planes_per_cluster", max_planes_per_cluster_, 4);
 
         // --- 平面筛选 ---
         pnh_.param("ring_plane/min_plane_area_points", min_plane_area_points_, 500);
@@ -116,76 +117,86 @@ class PlaneExtract
         ROS_DEBUG("[PlaneExtract] ROI 点云 %zu 个点，聚类得到 %zu 个簇", roi_cloud->size(),
                   cluster_indices.size());
 
-        // ---- Step 3: 对每个聚类做 RANSAC 平面提取 ----
+        // ---- Step 3: 对每个聚类做迭代 RANSAC 平面提取 ----
+        // 同一簇可能包含多个平面（如转角处两面墙），迭代提取直到剩余点不够
         pcl::ExtractIndices<PointT> extract;
-        extract.setInputCloud(roi_cloud);
+        pcl::SACSegmentation<PointT> seg;
+        seg.setOptimizeCoefficients(true);
+        seg.setModelType(pcl::SACMODEL_PLANE);
+        seg.setMethodType(pcl::SAC_RANSAC);
+        seg.setDistanceThreshold(ransac_distance_threshold_);
 
         for (const auto &indices : cluster_indices) {
             // 构造该聚类的子点云
             pcl::PointIndices::Ptr cluster_inliers(new pcl::PointIndices(indices));
             Ptr cluster_cloud(new PointCloudT);
+            extract.setInputCloud(roi_cloud);
             extract.setIndices(cluster_inliers);
             extract.setNegative(false);
             extract.filter(*cluster_cloud);
 
             if (cluster_cloud->size() < static_cast<size_t>(ransac_min_inliers_)) continue;
 
-            // RANSAC 平面拟合
-            pcl::SACSegmentation<PointT> seg;
-            seg.setOptimizeCoefficients(true);
-            seg.setModelType(pcl::SACMODEL_PLANE);
-            seg.setMethodType(pcl::SAC_RANSAC);
-            seg.setDistanceThreshold(ransac_distance_threshold_);
-            seg.setInputCloud(cluster_cloud);
+            // 该簇剩余点云（迭代中逐步移除已提取的平面内点）
+            Ptr remaining(new PointCloudT(*cluster_cloud));
 
-            pcl::PointIndices inlier_indices;
-            pcl::ModelCoefficients coeffs;
-            seg.segment(inlier_indices, coeffs);
+            for (int plane_iter = 0; plane_iter < max_planes_per_cluster_; ++plane_iter) {
+                if (remaining->size() < static_cast<size_t>(ransac_min_inliers_)) break;
 
-            if (inlier_indices.indices.size() < static_cast<size_t>(ransac_min_inliers_)) continue;
+                // RANSAC 平面拟合
+                seg.setInputCloud(remaining);
+                pcl::PointIndices inlier_indices;
+                pcl::ModelCoefficients coeffs;
+                seg.segment(inlier_indices, coeffs);
 
-            // 提取内点云
-            Ptr inlier_cloud(new PointCloudT);
-            extract.setInputCloud(cluster_cloud);
-            extract.setIndices(pcl::PointIndices::Ptr(new pcl::PointIndices(inlier_indices)));
-            extract.setNegative(false);
-            extract.filter(*inlier_cloud);
+                if (inlier_indices.indices.size() < static_cast<size_t>(ransac_min_inliers_)) break;
 
-            // ---- Step 4: 平面筛选 ----
-            PlaneParams plane;
-            plane.coefficients = Eigen::Vector4f(coeffs.values[0], coeffs.values[1],
-                                                 coeffs.values[2], coeffs.values[3]);
-            plane.inliers.reset(new pcl::PointIndices(inlier_indices));
-            plane.cloud          = inlier_cloud;
-            plane.point_count    = static_cast<int>(inlier_indices.indices.size());
+                // 提取内点云
+                pcl::PointIndices::Ptr p_inliers(new pcl::PointIndices(inlier_indices));
+                Ptr inlier_cloud(new PointCloudT);
+                extract.setInputCloud(remaining);
+                extract.setIndices(p_inliers);
+                extract.setNegative(false);
+                extract.filter(*inlier_cloud);
 
-            // 平面法向量
-            plane.normal         = plane.coefficients.head<3>().normalized();
+                // ---- 平面筛选 ----
+                PlaneParams plane;
+                plane.coefficients = Eigen::Vector4f(coeffs.values[0], coeffs.values[1],
+                                                     coeffs.values[2], coeffs.values[3]);
+                plane.inliers     = p_inliers;
+                plane.cloud       = inlier_cloud;
+                plane.point_count = static_cast<int>(inlier_indices.indices.size());
+                plane.normal      = plane.coefficients.head<3>().normalized();
 
-            // 只保留近似竖直的平面（法向量接近水平）
-            float vertical_angle = std::acos(std::abs(plane.normal.dot(Eigen::Vector3f::UnitZ())));
-            vertical_angle       = vertical_angle * 180.0f / M_PI;
-            if (std::abs(90.0f - vertical_angle) > max_plane_vertical_angle_) {
-                ROS_DEBUG("[PlaneExtract] 跳过非竖直平面，与竖直面夹角 %.1f° > %.1f°",
-                          std::abs(90.0f - vertical_angle), max_plane_vertical_angle_);
-                continue;
+                // 只保留近似竖直的平面（法向量接近水平）
+                float vertical_angle = std::acos(std::abs(plane.normal.dot(Eigen::Vector3f::UnitZ())));
+                vertical_angle       = vertical_angle * 180.0f / M_PI;
+                if (std::abs(90.0f - vertical_angle) > max_plane_vertical_angle_) {
+                    ROS_DEBUG("[PlaneExtract] 跳过非竖直平面 (簇内第%d个)，夹角 %.1f°",
+                              plane_iter + 1, std::abs(90.0f - vertical_angle));
+                }
+                else if (plane.point_count < min_plane_area_points_) {
+                    ROS_DEBUG("[PlaneExtract] 跳过小平面 (簇内第%d个)，点数 %d < %d",
+                              plane_iter + 1, plane.point_count, min_plane_area_points_);
+                }
+                else {
+                    // 计算平面中心
+                    plane.center = Eigen::Vector3f::Zero();
+                    for (const auto &pt : inlier_cloud->points) {
+                        plane.center += pt.getVector3fMap();
+                    }
+                    plane.center /= static_cast<float>(inlier_cloud->size());
+                    results.push_back(plane);
+                }
+
+                // 移除本次平面内点，继续从剩余点中提取下一平面
+                Ptr new_remaining(new PointCloudT);
+                extract.setInputCloud(remaining);
+                extract.setIndices(p_inliers);
+                extract.setNegative(true);   // 保留非内点
+                extract.filter(*new_remaining);
+                remaining = new_remaining;
             }
-
-            // 平面点数筛选
-            if (plane.point_count < min_plane_area_points_) {
-                ROS_DEBUG("[PlaneExtract] 跳过小平面，点数 %d < %d", plane.point_count,
-                          min_plane_area_points_);
-                continue;
-            }
-
-            // 计算平面中心
-            plane.center = Eigen::Vector3f::Zero();
-            for (const auto &pt : inlier_cloud->points) {
-                plane.center += pt.getVector3fMap();
-            }
-            plane.center /= static_cast<float>(inlier_cloud->size());
-
-            results.push_back(plane);
         }
 
         ROS_DEBUG("[PlaneExtract] 提取到 %zu 个有效平面", results.size());
@@ -208,6 +219,7 @@ class PlaneExtract
     // RANSAC 参数
     float ransac_distance_threshold_ = 0.03f;
     int ransac_min_inliers_          = 50;
+    int max_planes_per_cluster_      = 4;   // 每个簇最多提取的平面数
 
     // 平面筛选
     int min_plane_area_points_       = 500;

@@ -76,6 +76,9 @@ class SquareRingMatch
         // --- 最大检测环数 ---
         pnh_.param("ring_match/max_rings_per_image", max_rings_per_image_, 3);
 
+        // --- 环孔洞验证：过滤实墙误匹配 ---
+        pnh_.param("ring_match/min_hole_ratio", min_hole_ratio_, 0.3f);
+
         // 加载模板 (通过通用 TemplateLoader，可移植路径解析)
         TemplateLoader loader("pcl_detection2");
         templates_ = loader.load(template_paths_);
@@ -102,11 +105,28 @@ class SquareRingMatch
         std::vector<MatchResult> results;
 
         if (projected_image.empty()) return results;
+
+        // ---- 放大过小的投影图，使环孔洞像素尺寸追上模板 ----
+        cv::Mat work_img = projected_image;
+        double img_scale = 1.0;
+        int min_side = std::min(projected_image.cols, projected_image.rows);
+        if (min_side > 0 && min_side < 200) {
+            img_scale = 200.0 / min_side;
+            cv::resize(projected_image, work_img, cv::Size(), img_scale, img_scale,
+                       cv::INTER_LINEAR);
+            cv::threshold(work_img, work_img, 127, 255, cv::THRESH_BINARY);
+            ROS_INFO("[SquareRingMatch] 投影图过小 (%dx%d), 放大 %.1fx → %dx%d",
+                     projected_image.cols, projected_image.rows,
+                     img_scale, work_img.cols, work_img.rows);
+        }
+
         if (templates_.empty()) {
             // 无模板时回退到轮廓检测
             ROS_DEBUG("[SquareRingMatch] 无模板，使用轮廓检测");
-            auto contour_results = detectByContour(projected_image);
+            auto contour_results = detectByContour(work_img);
             results.insert(results.end(), contour_results.begin(), contour_results.end());
+            // 缩放回原始坐标
+            if (img_scale != 1.0) scaleResultsBack(results, img_scale);
             return results;
         }
 
@@ -131,16 +151,16 @@ class SquareRingMatch
                     cv::Mat resized;
                     cv::resize(templ, resized, cv::Size(), sx, sy, cv::INTER_LINEAR);
 
-                    if (resized.cols > projected_image.cols ||
-                        resized.rows > projected_image.rows)
+                    if (resized.cols > work_img.cols ||
+                        resized.rows > work_img.rows)
                         continue;
 
-                    int result_cols = projected_image.cols - resized.cols + 1;
-                    int result_rows = projected_image.rows - resized.rows + 1;
+                    int result_cols = work_img.cols - resized.cols + 1;
+                    int result_rows = work_img.rows - resized.rows + 1;
                     if (result_cols <= 0 || result_rows <= 0) continue;
 
                     cv::Mat match_result;
-                    cv::matchTemplate(projected_image, resized, match_result, match_method_);
+                    cv::matchTemplate(work_img, resized, match_result, match_method_);
 
                     bool is_inverse = (match_method_ == cv::TM_SQDIFF ||
                                        match_method_ == cv::TM_SQDIFF_NORMED);
@@ -179,6 +199,7 @@ class SquareRingMatch
         }
 
         // ---- 非极大值抑制 (NMS) ----
+        size_t raw_count = candidates.size();
         candidates = nonMaxSuppression(candidates);
 
         // ---- 限制数量并细化角点 ----
@@ -186,17 +207,33 @@ class SquareRingMatch
             candidates.resize(max_rings_per_image_);
         }
 
+        ROS_INFO("[SquareRingMatch] 模板匹配: raw=%zu → NMS=%zu (max_per_image=%d), 开始孔洞验证",
+                 raw_count, candidates.size(), max_rings_per_image_);
+
+        int rejected = 0;
         for (auto &cand : candidates) {
-            // 用匹配框从原始图中提取 ROI，用 minAreaRect 细化角点
+            // 保存原始匹配框 (用于后续环孔洞验证)
             cv::Point2f pt1 = cand.corners[0];
             cv::Point2f pt2 = cand.corners[2];
-            cv::Rect roi(static_cast<int>(pt1.x), static_cast<int>(pt1.y),
-                         static_cast<int>(pt2.x - pt1.x),
-                         static_cast<int>(pt2.y - pt1.y));
-            roi &= cv::Rect(0, 0, projected_image.cols, projected_image.rows);
+            cv::Rect orig_match_rect(static_cast<int>(pt1.x), static_cast<int>(pt1.y),
+                                     static_cast<int>(pt2.x - pt1.x),
+                                     static_cast<int>(pt2.y - pt1.y));
+            orig_match_rect &= cv::Rect(0, 0, work_img.cols, work_img.rows);
+
+            // ---- 环孔洞验证：排除实墙误匹配 (使用原始匹配框) ----
+            // 必须在轮廓细化之前执行，因为细化后角点会变成内孔轮廓，
+            // 此时内孔区域必然是纯黑的，无法区分真环和墙缝
+            if (!validateRingHole(work_img, orig_match_rect)) {
+                ROS_INFO("[SquareRingMatch] 孔洞验证拒绝 #%d: score=%.3f (疑似实墙)",
+                         ++rejected, cand.score);
+                continue;
+            }
+
+            // 用匹配框从原始图中提取 ROI，用 minAreaRect 细化角点
+            cv::Rect roi = orig_match_rect;
 
             if (roi.width > 5 && roi.height > 5) {
-                cv::Mat roi_img = projected_image(roi);
+                cv::Mat roi_img = work_img(roi);
                 cv::Mat inverted;
                 cv::bitwise_not(roi_img, inverted);
 
@@ -229,21 +266,74 @@ class SquareRingMatch
                 }
             }
 
-            results.push_back(cand);
+            // 尺寸评分：环越小分越低 (短边<30px线性扣分，以上不扣)
+            cv::Rect corner_bbox = cv::boundingRect(cand.corners);
+            float hole_short = std::min(corner_bbox.width, corner_bbox.height);
+            float size_factor = 1.0f;
+            if (hole_short < 150.0f) {
+                size_factor = hole_short / 150.0f;        // 太小 → 扣分
+            }
+            cand.score = cand.score * size_factor;
 
-            ROS_DEBUG("[SquareRingMatch] 匹配成功: t=%d scale=(%.2f,%.2f) score=%.3f",
+            // 模板匹配加分加成，确保优先于轮廓fallback
+            cand.score += 0.30f;
+            results.push_back(cand);
+            ROS_DEBUG("[SquareRingMatch] 匹配成功+孔洞验证通过: t=%d scale=(%.2f,%.2f) score=%.3f",
                       cand.template_id, cand.scale_x, cand.scale_y, cand.score);
         }
 
+        ROS_INFO("[SquareRingMatch] 模板路径验证: %zu 通过 / %zu 候选 (拒绝=%d)",
+                 results.size(), candidates.size(), rejected);
+
         // ---- Fallback: 轮廓检测 ----
         if (results.empty()) {
-            results = detectByContour(projected_image);
+            ROS_INFO("[SquareRingMatch] 模板路径 0 结果 → 进入轮廓fallback");
+            auto contour_results = detectByContour(work_img);
+            ROS_INFO("[SquareRingMatch] 轮廓fallback检出: %zu 个四边形候选", contour_results.size());
+            // 轮廓检测结果也需要孔洞验证
+            // 轮廓角点指向内部孔洞，需向外扩展匹配框来验证环体
+            int contour_rejected = 0;
+            for (const auto &cr : contour_results) {
+                if (cr.corners.size() != 4) continue;
+                cv::Rect bbox = cv::boundingRect(cr.corners);
+                int expand = std::max(4, std::min(bbox.width, bbox.height) / 4);
+                cv::Rect expanded(
+                    std::max(0, bbox.x - expand),
+                    std::max(0, bbox.y - expand),
+                    std::min(work_img.cols - std::max(0, bbox.x - expand),
+                             bbox.width + 2 * expand),
+                    std::min(work_img.rows - std::max(0, bbox.y - expand),
+                             bbox.height + 2 * expand));
+                if (validateRingHole(work_img, expanded)) {
+                    results.push_back(cr);
+                } else {
+                    ++contour_rejected;
+                }
+            }
+            ROS_INFO("[SquareRingMatch] 轮廓fallback验证: %zu 通过 / %zu 候选 (拒绝=%d)",
+                     results.size(), contour_results.size(), contour_rejected);
         }
 
+        // ---- 缩放回原始图像坐标 ----
+        if (img_scale != 1.0) scaleResultsBack(results, img_scale);
+
+        ROS_INFO("[SquareRingMatch] 最终返回: %zu 个方环", results.size());
         return results;
     }
 
   private:
+    /**
+     * @brief 将匹配结果的角点坐标从放大图缩放回原始图
+     */
+    static void scaleResultsBack(std::vector<MatchResult> &results, double scale) {
+        for (auto &r : results) {
+            for (auto &c : r.corners) {
+                c.x /= static_cast<float>(scale);
+                c.y /= static_cast<float>(scale);
+            }
+        }
+    }
+
     /**
      * @brief IoU-based NMS，按得分降序处理，保留非重叠的高分匹配
      */
@@ -309,10 +399,17 @@ class SquareRingMatch
         cv::Mat inverted;
         cv::bitwise_not(image, inverted);
 
+        // 膨胀合并碎片化的孔洞区域 (三边环或不完整投影会导致孔洞断裂)
+        cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
+        cv::dilate(inverted, inverted, kernel);
+
         std::vector<std::vector<cv::Point>> contours;
         cv::findContours(inverted, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
 
         if (contours.empty()) return results;
+
+        const int img_w = image.cols, img_h = image.rows;
+        const int border_margin = 2;  // 距图像边缘的最小距离(px)
 
         // 收集所有候选，按面积排序取前 N
         std::vector<MatchResult> candidates;
@@ -321,30 +418,67 @@ class SquareRingMatch
             double area = cv::contourArea(contour);
             if (area < 100) continue;
 
+            cv::Rect bbox = cv::boundingRect(contour);
+
+            // 排除触碰图像边界的轮廓 (是投影图的黑边框，不是真正的环孔洞)
+            if (bbox.x <= border_margin || bbox.y <= border_margin ||
+                bbox.x + bbox.width  >= img_w - border_margin ||
+                bbox.y + bbox.height >= img_h - border_margin) {
+                ROS_DEBUG("[SquareRingMatch] 轮廓fallback: 丢弃边界轮廓 bbox=(%d,%d %dx%d)",
+                          bbox.x, bbox.y, bbox.width, bbox.height);
+                continue;
+            }
+
+            // 排除占图像面积>50%的轮廓
+            double img_area = img_w * img_h;
+            if (area > img_area * 0.5) continue;
+
+            // 尺寸和比例检查
+            if (bbox.width < expected_size_min_ || bbox.height < expected_size_min_)
+                continue;
+            if (bbox.width > expected_size_max_ || bbox.height > expected_size_max_)
+                continue;
+
+            float aspect = static_cast<float>(bbox.width) / static_cast<float>(bbox.height);
+            if (aspect < 0.4f || aspect > 2.5f) continue;
+
+            // 尝试 approxPolyDP (4顶点优先)
             std::vector<cv::Point> approx;
             double epsilon = 0.02 * cv::arcLength(contour, true);
             cv::approxPolyDP(contour, approx, epsilon, true);
 
+            std::vector<cv::Point2f> corners_4;
+
             if (approx.size() == 4) {
-                cv::Rect bbox = cv::boundingRect(approx);
-                if (bbox.width < expected_size_min_ || bbox.height < expected_size_min_)
-                    continue;
-                if (bbox.width > expected_size_max_ || bbox.height > expected_size_max_)
-                    continue;
+                // 完美：4顶点四边形
+                for (const auto &p : approx)
+                    corners_4.push_back(cv::Point2f(p.x, p.y));
+            } else {
+                // 非标准形状 (3边或不规则) → 用 minAreaRect 推断4角
+                cv::RotatedRect rrect = cv::minAreaRect(contour);
+                cv::Point2f box[4];
+                rrect.points(box);
+                for (int k = 0; k < 4; ++k) corners_4.push_back(box[k]);
 
-                float aspect = static_cast<float>(bbox.width) / static_cast<float>(bbox.height);
-                if (aspect < 0.5f || aspect > 2.0f) continue;
-
-                MatchResult result;
-                result.corners = sortCornersClockwise({
-                    cv::Point2f(approx[0].x, approx[0].y),
-                    cv::Point2f(approx[1].x, approx[1].y),
-                    cv::Point2f(approx[2].x, approx[2].y),
-                    cv::Point2f(approx[3].x, approx[3].y)});
-                result.matched = true;
-                result.score   = 0.7f;  // contour 检测的置信度略高一些
-                candidates.push_back(result);
+                // 验证 minAreaRect 结果合理
+                cv::Rect rbbox = rrect.boundingRect();
+                float r_aspect = static_cast<float>(rbbox.width) / static_cast<float>(rbbox.height);
+                if (r_aspect < 0.3f || r_aspect > 3.0f) continue;
             }
+
+            // 验证4角点都在图像范围内
+            bool ok = true;
+            for (const auto &c : corners_4) {
+                if (c.x < 0 || c.y < 0 || c.x >= img_w || c.y >= img_h) { ok = false; break; }
+            }
+            if (!ok) continue;
+
+            MatchResult result;
+            result.corners = sortCornersClockwise(corners_4);
+            result.matched = true;
+            // 4顶点精确匹配分高，minAreaRect推断分低
+            result.score = (approx.size() == 4) ? 0.70f : 0.55f;
+            candidates.push_back(result);
         }
 
         // 按 bbox 面积降序，取前 max_rings_per_image_
@@ -386,6 +520,53 @@ class SquareRingMatch
         return {tl, tr, br, bl};
     }
 
+    /**
+     * @brief 环孔洞验证 — 排除实墙误匹配（使用原始模板匹配框）
+     *
+     * 问题：模板匹配可能把实墙也匹配为"环"（因为边框相似）。
+     *       但真环的匹配区域中心应该是空的（激光无点），
+     *       实墙匹配区域中心全是点。
+     *
+     * 做法：取原始匹配框（模板匹配的完整区域），验证中心区域
+     *       黑像素占比 ≥ min_hole_ratio_（是空洞）。
+     *
+     * 注意：必须在轮廓细化之前调用，因为细化后角点指向内孔，
+     *       内孔区域必然是纯黑的，无法区分真环和墙缝。
+     *
+     * @param projected_image 投影二值图
+     * @param match_rect      原始模板匹配框 (图像坐标系)
+     * @return true = 是真环，false = 疑似实墙
+     */
+    bool validateRingHole(const cv::Mat &projected_image,
+                          const cv::Rect &match_rect) const {
+        if (match_rect.width < 10 || match_rect.height < 10) return true;
+
+        cv::Mat roi = projected_image(match_rect);
+
+        // 中心区域：边界各缩 25%
+        int margin_x = std::max(1, match_rect.width / 4);
+        int margin_y = std::max(1, match_rect.height / 4);
+        cv::Rect inner_rect(margin_x, margin_y,
+                             match_rect.width  - 2 * margin_x,
+                             match_rect.height - 2 * margin_y);
+
+        if (inner_rect.width <= 0 || inner_rect.height <= 0) return true;
+
+        cv::Mat inner = roi(inner_rect);
+        int inner_total = inner.total();
+        int inner_white = cv::countNonZero(inner);
+        int inner_black = inner_total - inner_white;
+        float hole_pct = static_cast<float>(inner_black) / inner_total;
+
+        bool pass = (hole_pct >= min_hole_ratio_);
+
+        ROS_DEBUG("[SquareRingMatch] 孔洞验证: center black=%.1f%% threshold=%.1f%% → %s",
+                  hole_pct * 100.0f, min_hole_ratio_ * 100.0f,
+                  pass ? "通过" : "拒绝(实墙)");
+
+        return pass;
+    }
+
     ros::NodeHandle pnh_;
 
     // 模板
@@ -414,6 +595,9 @@ class SquareRingMatch
 
     // 每张图最大环数
     int max_rings_per_image_ = 3;
+
+    // 环孔洞验证：中心区域最少黑像素占比（低于此值视为实墙）
+    float min_hole_ratio_ = 0.3f;
 };
 
 }  // namespace core

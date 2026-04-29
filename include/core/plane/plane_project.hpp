@@ -142,15 +142,38 @@ class PlaneProject
         cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
         cv::morphologyEx(result.image, result.image, cv::MORPH_CLOSE, kernel);
 
-        // ---- Step 7: 构建投影矩阵 ----
+        // ---- Step 7: 裁剪图像到实际有点区域 (去掉四周黑边) ----
+        std::vector<cv::Point> nonzero_pts;
+        cv::findNonZero(result.image, nonzero_pts);
+        if (!nonzero_pts.empty()) {
+            cv::Rect crop_rect = cv::boundingRect(nonzero_pts);
+            // 不留余量
+            int pad = 0;
+            crop_rect.x      = std::max(0, crop_rect.x - pad);
+            crop_rect.y      = std::max(0, crop_rect.y - pad);
+            crop_rect.width  = std::min(result.image.cols - crop_rect.x, crop_rect.width + 2 * pad);
+            crop_rect.height = std::min(result.image.rows - crop_rect.y, crop_rect.height + 2 * pad);
+
+            if (crop_rect.width > 0 && crop_rect.height > 0) {
+                result.image = result.image(crop_rect).clone();
+
+                // 更新投影原点：像素(0,0)对应的3D坐标 = margin调整后的min + crop偏移
+                float crop_x_m = crop_rect.x * resolution_;
+                float crop_y_m = crop_rect.y * resolution_;
+                result.x_min = min_x + crop_x_m;
+                result.y_min = min_y + crop_y_m;
+            }
+        }
+
+        // ---- Step 8: 构建投影矩阵 (使用裁剪后的 x_min/y_min) ----
         result.tf_plane = transform;
 
         // tf_2d: 将平面坐标系的 (x, y) 映射到像素 (col, row)
         result.tf_2d = Eigen::Matrix3f::Identity();
-        result.tf_2d(0, 0) = inv_resolution;   // col = (x - min_x) / res
-        result.tf_2d(0, 2) = -min_x * inv_resolution;
-        result.tf_2d(1, 1) = inv_resolution;   // row = (y - min_y) / res
-        result.tf_2d(1, 2) = -min_y * inv_resolution;
+        result.tf_2d(0, 0) = inv_resolution;   // col = (x - x_min) / res
+        result.tf_2d(0, 2) = -result.x_min * inv_resolution;
+        result.tf_2d(1, 1) = inv_resolution;   // row = (y - y_min) / res
+        result.tf_2d(1, 2) = -result.y_min * inv_resolution;
 
         return result;
     }

@@ -60,21 +60,22 @@ ring_pipeline:
 
 ring_plane:
   # ROI (平面提取前的裁剪范围，世界坐标系)
-  roi_x_min: -3.0
-  roi_x_max: -1.0
+  roi_x_min: -2.0
+  roi_x_max: 0.0
   roi_y_min: -1.25
   roi_y_max: 1.25
   roi_z_min: -0.15
   roi_z_max: 3.25
 
   # 欧式聚类
-  cluster_tolerance: 0.05
+  cluster_tolerance: 0.15
   cluster_min_size: 100
-  cluster_max_size: 2000
+  cluster_max_size: 30000
 
   # RANSAC 平面拟合
   ransac_distance_threshold: 0.03
   ransac_min_inliers: 50
+  max_planes_per_cluster: 4      # 每个欧式聚类中最多提取的平面数 (迭代RANSAC)
 
   # 平面筛选
   min_plane_area_points: 300
@@ -89,6 +90,7 @@ ring_match:
   # 相对路径会相对于 <pcl_detection2 包路径>/templates/ 解析
   template_paths:
     - "obs1.png"
+    - "obs_from_dump.png"
 
   # 单模板路径 (当 template_paths 为空时使用)
   template_path: ""
@@ -97,7 +99,7 @@ ring_match:
   # 不设置则统一使用 match_threshold
   template_thresholds: []
 
-  match_threshold: 0.65
+  match_threshold: 0.45
   match_method: 5                        # TM_CCOEFF_NORMED
 
   # 多尺度匹配参数 (±20%, 与参考实现一致)
@@ -117,7 +119,12 @@ ring_match:
   # 每张投影图最大检测环数
   max_rings_per_image: 3
 
+  # 环孔洞验证：消除实墙误匹配
+  # 匹配区域中心至少要有这么多比例的黑像素(孔洞)，否则视为实墙丢弃
+  # 取值范围 0.0~1.0，0.3 表示中心至少 30% 是空的
+  min_hole_ratio: 0.3
+
   # 轮廓检测 fallback
   expected_size_min: 20
-  expected_size_max: 200
-  contour_area_ratio_min: 0.3
+  expected_size_max: 400
+  contour_area_ratio_min: 0.5
