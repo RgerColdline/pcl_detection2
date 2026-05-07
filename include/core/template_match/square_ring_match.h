@@ -207,7 +207,7 @@ class SquareRingMatch
             candidates.resize(max_rings_per_image_);
         }
 
-        ROS_INFO("[SquareRingMatch] 模板匹配: raw=%zu → NMS=%zu (max_per_image=%d), 开始孔洞验证",
+        ROS_DEBUG("[SquareRingMatch] 模板匹配: raw=%zu → NMS=%zu (max_per_image=%d), 开始孔洞验证",
                  raw_count, candidates.size(), max_rings_per_image_);
 
         int rejected = 0;
@@ -224,7 +224,7 @@ class SquareRingMatch
             // 必须在轮廓细化之前执行，因为细化后角点会变成内孔轮廓，
             // 此时内孔区域必然是纯黑的，无法区分真环和墙缝
             if (!validateRingHole(work_img, orig_match_rect)) {
-                ROS_INFO("[SquareRingMatch] 孔洞验证拒绝 #%d: score=%.3f (疑似实墙)",
+                ROS_DEBUG("[SquareRingMatch] 孔洞验证拒绝 #%d: score=%.3f (疑似实墙)",
                          ++rejected, cand.score);
                 continue;
             }
@@ -282,14 +282,14 @@ class SquareRingMatch
                       cand.template_id, cand.scale_x, cand.scale_y, cand.score);
         }
 
-        ROS_INFO("[SquareRingMatch] 模板路径验证: %zu 通过 / %zu 候选 (拒绝=%d)",
+        ROS_DEBUG("[SquareRingMatch] 模板路径验证: %zu 通过 / %zu 候选 (拒绝=%d)",
                  results.size(), candidates.size(), rejected);
 
         // ---- Fallback: 轮廓检测 ----
         if (results.empty()) {
-            ROS_INFO("[SquareRingMatch] 模板路径 0 结果 → 进入轮廓fallback");
+            ROS_DEBUG("[SquareRingMatch] 模板路径 0 结果 → 进入轮廓fallback");
             auto contour_results = detectByContour(work_img);
-            ROS_INFO("[SquareRingMatch] 轮廓fallback检出: %zu 个四边形候选", contour_results.size());
+            ROS_DEBUG("[SquareRingMatch] 轮廓fallback检出: %zu 个四边形候选", contour_results.size());
             // 轮廓检测结果也需要孔洞验证
             // 轮廓角点指向内部孔洞，需向外扩展匹配框来验证环体
             int contour_rejected = 0;
@@ -310,14 +310,14 @@ class SquareRingMatch
                     ++contour_rejected;
                 }
             }
-            ROS_INFO("[SquareRingMatch] 轮廓fallback验证: %zu 通过 / %zu 候选 (拒绝=%d)",
+            ROS_DEBUG("[SquareRingMatch] 轮廓fallback验证: %zu 通过 / %zu 候选 (拒绝=%d)",
                      results.size(), contour_results.size(), contour_rejected);
         }
 
         // ---- 缩放回原始图像坐标 ----
         if (img_scale != 1.0) scaleResultsBack(results, img_scale);
 
-        ROS_INFO("[SquareRingMatch] 最终返回: %zu 个方环", results.size());
+        ROS_DEBUG("[SquareRingMatch] 最终返回: %zu 个方环", results.size());
         return results;
     }
 

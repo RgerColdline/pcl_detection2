@@ -75,6 +75,7 @@ class ExtractSquareRing
         pnh_.param("ring_pipeline/publish_debug_cloud", publish_debug_cloud_, true);
         pnh_.param("ring_pipeline/max_planes", max_planes_, 2);
         pnh_.param("ring_pipeline/ring_half_thickness", ring_half_thickness_, 0.25f);
+        pnh_.param("ring_pipeline/dump_enabled", dump_enabled_, false);
 
         // --- ROS 通信 ---
         cloud_sub_ =
@@ -92,7 +93,7 @@ class ExtractSquareRing
         tf_buffer_   = std::make_shared<tf2_ros::Buffer>();
         tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
-        ROS_INFO("[ExtractSquareRing] 初始化完成，订阅: %s", input_cloud_topic_.c_str());
+        ROS_DEBUG("[ExtractSquareRing] 初始化完成，订阅: %s", input_cloud_topic_.c_str());
     }
 
     /**
@@ -145,7 +146,7 @@ class ExtractSquareRing
         // ---- 临时调试：延时保存投影图 ----
         bool do_dump = shouldDumpNow();
 
-        ROS_INFO("[ExtractSquareRing] 处理 %zu 个平面，开始投影+匹配", planes.size());
+        ROS_DEBUG("[ExtractSquareRing] 处理 %zu 个平面，开始投影+匹配", planes.size());
 
         // ---- Step 2: 投影 + 模板匹配 (收集所有候选) ----
         struct RingCandidate {
@@ -189,7 +190,7 @@ class ExtractSquareRing
                 dumpOneImage(dump_img, scaled_matches);
             }
 
-            ROS_INFO("[ExtractSquareRing] 平面 #%d: 匹配到 %zu 个环候选 (size=%dx%d)",
+            ROS_DEBUG("[ExtractSquareRing] 平面 #%d: 匹配到 %zu 个环候选 (size=%dx%d)",
                      plane_idx, match_results.size(),
                      proj_result.image.cols, proj_result.image.rows);
 
@@ -224,13 +225,13 @@ class ExtractSquareRing
                     std::remove_if(candidates.begin(), candidates.end(),
                                    [](const RingCandidate &c) { return c.score <= 0.70f; }),
                     candidates.end());
-                ROS_INFO("[ExtractSquareRing] 过滤fallback: %zu → %zu 候选 (保留模板匹配)",
+                ROS_DEBUG("[ExtractSquareRing] 过滤fallback: %zu → %zu 候选 (保留模板匹配)",
                          before, candidates.size());
             }
         }
 
         // 最佳候选 → SquareRing 消息; 全部候选 → rviz markers (最佳=金色高亮)
-        ROS_INFO("[ExtractSquareRing] 收集完成: %zu 个候选 (跨 %d 个平面)",
+        ROS_DEBUG("[ExtractSquareRing] 收集完成: %zu 个候选 (跨 %d 个平面)",
                  candidates.size(), plane_idx);
 
         if (!candidates.empty()) {
@@ -240,9 +241,9 @@ class ExtractSquareRing
                           return a.score > b.score;
                       });
 
-            ROS_INFO("[ExtractSquareRing] Top-3 候选得分:");
+            ROS_DEBUG("[ExtractSquareRing] Top-3 候选得分:");
             for (size_t i = 0; i < std::min(candidates.size(), size_t(3)); ++i) {
-                ROS_INFO("  #%zu: score=%.4f plane=#%d tpl=%d scale=(%.2f,%.2f)",
+                ROS_DEBUG("  #%zu: score=%.4f plane=#%d tpl=%d scale=(%.2f,%.2f)",
                          i, candidates[i].score, candidates[i].plane_idx,
                          candidates[i].match.template_id,
                          candidates[i].match.scale_x, candidates[i].match.scale_y);
@@ -312,7 +313,7 @@ class ExtractSquareRing
                     best.match.corners, best.proj, best.plane, drone_pos);
                 float w = (best_3d.corners[0] - best_3d.corners[1]).norm();
                 float h = (best_3d.corners[1] - best_3d.corners[2]).norm();
-                ROS_INFO("[ExtractSquareRing] >>> 发布: score=%.4f size=%.2fx%.2f m "
+                ROS_DEBUG("[ExtractSquareRing] >>> 发布: score=%.4f size=%.2fx%.2f m "
                          "center=(%.2f,%.2f,%.2f) markers=%zu (共 %zu 候选)",
                          best.score, w, h,
                          best_3d.center.x(), best_3d.center.y(), best_3d.center.z(),
@@ -321,7 +322,7 @@ class ExtractSquareRing
                 ROS_WARN("[ExtractSquareRing] 最佳候选发布失败");
             }
         } else {
-            ROS_INFO("[ExtractSquareRing] 无候选，未发布方环");
+            ROS_DEBUG("[ExtractSquareRing] 无候选，未发布方环");
         }
     }
 
@@ -352,6 +353,7 @@ class ExtractSquareRing
      * @return true = 本次 process() 应该保存所有平面投影图
      */
     bool shouldDumpNow() {
+        if (!dump_enabled_) return false;
         if (dump_count_ >= 3) return false;
 
         const ros::Time now = ros::Time::now();
@@ -359,7 +361,7 @@ class ExtractSquareRing
         // 首次记录起始时间
         if (dump_start_time_.isZero()) {
             dump_start_time_ = now;
-            ROS_INFO("[ExtractSquareRing] 投影图 dump 已预约: %ds 后开始，每5s一次，共3次", 15);
+            ROS_DEBUG("[ExtractSquareRing] 投影图 dump 已预约: %ds 后开始，每5s一次，共3次", 15);
             return false;
         }
 
@@ -425,7 +427,7 @@ class ExtractSquareRing
 
         cv::imwrite(fname.str(), vis);
 
-        ROS_INFO("[ExtractSquareRing] dump #%d plane-%d: %s (%dx%d, %zu rings)",
+        ROS_DEBUG("[ExtractSquareRing] dump #%d plane-%d: %s (%dx%d, %zu rings)",
                  dump_count_ - 1, dump_plane_idx_,
                  fname.str().c_str(), vis.cols, vis.rows, matches.size());
 
@@ -581,6 +583,7 @@ class ExtractSquareRing
     std::string dump_save_dir_;
     int dump_count_ = 0;
     int dump_plane_idx_ = 0;
+    bool dump_enabled_ = false;
 };
 
 }  // namespace pipeline

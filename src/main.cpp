@@ -4,6 +4,7 @@
 #include "core/roi.hpp"
 #include "core/voxel.hpp"
 #include "pipeline/extract_square_ring.hpp"
+#include "core/pillar_detect.hpp"
 
 #include <pcl/common/transforms.h>
 #include <pcl/filters/crop_box.h>
@@ -15,6 +16,8 @@
 #include <pcl_conversions/pcl_conversions.h>
 #include <ros/ros.h>
 #include <sensor_msgs/PointCloud2.h>
+#include <std_msgs/Int32.h>
+#include <std_msgs/Empty.h>
 
 #include <cmath>
 #include <deque>
@@ -171,6 +174,17 @@ class CloudAccumulator
         voxel_filter_ = std::make_unique<VoxelFilterT>(voxel_leaf_size_, map_r_decay_coeff_);
 
         ring_extractor_.init(nh_, pnh_);
+
+        // 柱子检测（可从YAML禁用）
+        bool pillar_enabled = true;
+        pnh_.param("pillar_detect_enabled", pillar_enabled, true);
+        if (pillar_enabled) {
+            pillar_detect_.init(pnh_);
+            pillar_result_pub_ = nh_.advertise<std_msgs::Int32>(
+                "/pcl_detection2/pillar_case_id", 1);
+            pillar_start_sub_ = nh_.subscribe("/pcl_detection2/start_pillar_detect", 1,
+                &CloudAccumulator::pillarStartCallback, this);
+        }
     }
 
     void cloudCallback(const livox_ros_driver2::CustomMsg::Ptr &livox_msg) {
@@ -211,12 +225,15 @@ class CloudAccumulator
         }
         if (timing_enable_) timing.mark("odom");
 
+        bool registration_accepted = false;
+
         if (!pose_initialized_) {
             last_odom_pose_ = odom_pose;
             last_map_pose_  = Eigen::Matrix4f::Identity();
             pcl::transformPointCloud(*downsampled_livox_cloud_, *aligned_livox_cloud_,
                                      last_map_pose_);
             pose_initialized_ = true;
+            registration_accepted = true;  // 首帧直接接受
             ROS_INFO("初始化局部地图，首帧直接写入地图窗口");
             if (timing_enable_) timing.mark("predict");
         }
@@ -228,7 +245,7 @@ class CloudAccumulator
                                      predicted_pose);
             if (timing_enable_) timing.mark("predict");
 
-            bool registration_accepted = false;
+            registration_accepted = false;
             if (!downsampled_registration_map_cloud_->empty()) {
                 buildRegistrationSubmap(predicted_pose);
 
@@ -287,7 +304,7 @@ class CloudAccumulator
 
         last_odom_pose_ = odom_pose;
 
-        updateRegistrationMap(aligned_livox_cloud_);
+        updateRegistrationMap(aligned_livox_cloud_, registration_accepted);
         if (timing_enable_) timing.mark("registration_map");
         updateLocalMap(aligned_livox_cloud_);
         if (timing_enable_) timing.mark("local_map");
@@ -311,6 +328,20 @@ class CloudAccumulator
         ++ring_detect_frame_counter_;
         if (ring_detect_frame_counter_ % 5 == 0 && !downsampled_local_map_cloud_->empty()) {
             ring_extractor_.processCloud(downsampled_local_map_cloud_);
+        }
+
+        // 柱子检测：收到start信号后逐帧匹配，匹配到自动停止
+        if (pillar_detect_active_ &&
+            !downsampled_registration_map_cloud_->empty())
+        {
+            auto result = pillar_detect_.detect(downsampled_registration_map_cloud_);
+            if (result.detected) {
+                std_msgs::Int32 msg;
+                msg.data = result.case_id;
+                pillar_result_pub_.publish(msg);
+                pillar_detect_active_ = false;  // 匹配到自动停止
+                ROS_INFO("[Pillar] 检测完成 case=%d, 自动停止匹配", result.case_id);
+            }
         }
     }
 
@@ -371,8 +402,14 @@ class CloudAccumulator
                                    VoxelFilterT::Mode::ACCUMULATE);
     }
 
-    void updateRegistrationMap(const PointCloudPtrT &aligned_cloud) {
+    void updateRegistrationMap(const PointCloudPtrT &aligned_cloud, bool icp_accepted) {
         if (!aligned_cloud || aligned_cloud->empty()) return;
+
+        // 只有 ICP 被接受的帧才加入配准地图，避免误差帧污染地图导致漂移累积
+        if (!icp_accepted) {
+            ROS_DEBUG_THROTTLE(1, "ICP未接受，跳过加入配准地图");
+            return;
+        }
 
         registration_map_frames_.emplace_back(new PointCloudT(*aligned_cloud));
         while (registration_map_frames_.size() > static_cast<size_t>(registration_frame_num_)) {
@@ -574,6 +611,13 @@ class CloudAccumulator
     std::unique_ptr<RegisterT> register_;
     std::unique_ptr<VoxelFilterT> voxel_filter_;
     pcl_detection2::pipeline::ExtractSquareRing ring_extractor_;
+    pcl_detection2::core::PillarDetect pillar_detect_;
+
+    // 柱子检测结果发布 + 启动订阅
+    ros::Publisher pillar_result_pub_;
+    ros::Subscriber pillar_start_sub_;
+    bool pillar_detect_active_ = false;
+    int pillar_detect_frame_counter_ = 0;
 
     PointCloudPtrT raw_livox_cloud_;
     PointCloudPtrT downsampled_livox_cloud_;
@@ -633,6 +677,11 @@ class CloudAccumulator
     int erosion_mean_k_;
     double erosion_thresh_;
     float projection_plane_z_;
+
+    void pillarStartCallback(const std_msgs::Empty::ConstPtr &) {
+        pillar_detect_active_ = true;
+        ROS_INFO("[Pillar] 收到启动信号，开始逐帧匹配");
+    }
 };
 
 int main(int argc, char **argv) {
