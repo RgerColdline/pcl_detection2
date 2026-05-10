@@ -168,6 +168,20 @@ class PlaneExtract
                 plane.point_count = static_cast<int>(inlier_indices.indices.size());
                 plane.normal      = plane.coefficients.head<3>().normalized();
 
+                // ---- 地面垂直修正：强制法向量严格水平 (Z=0) ----
+                // RANSAC 拟合的墙面法向量可能有微小Z分量，影响后续投影和前后点计算
+                {
+                    Eigen::Vector3f corrected = plane.normal;
+                    corrected.z() = 0.0f;
+                    float n = corrected.norm();
+                    if (n > 1e-6f) {
+                        corrected /= n;
+                        plane.normal = corrected;
+                        // 同步更新 coefficients 的头三维，保持一致性
+                        plane.coefficients.head<3>() = corrected;
+                    }
+                }
+
                 // 只保留近似竖直的平面（法向量接近水平）
                 float vertical_angle = std::acos(std::abs(plane.normal.dot(Eigen::Vector3f::UnitZ())));
                 vertical_angle       = vertical_angle * 180.0f / M_PI;
@@ -186,6 +200,11 @@ class PlaneExtract
                         plane.center += pt.getVector3fMap();
                     }
                     plane.center /= static_cast<float>(inlier_cloud->size());
+
+                    // 地面垂直修正后，重新计算 d 以保证平面方程一致
+                    // 平面方程: n·p + d = 0 → d = -n·center
+                    plane.coefficients[3] = -plane.normal.dot(plane.center);
+
                     results.push_back(plane);
                 }
 
