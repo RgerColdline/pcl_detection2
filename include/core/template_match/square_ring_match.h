@@ -443,16 +443,15 @@ class SquareRingMatch
                     for (const auto &p : approx) corners_4.push_back(cv::Point2f(p.x, p.y));
                 }
                 else if (approx.size() == 3) {
-                    cv::Point2f pts[3] = {
-                        cv::Point2f(approx[0].x, approx[0].y),
-                        cv::Point2f(approx[1].x, approx[1].y),
-                        cv::Point2f(approx[2].x, approx[2].y)
-                    };
+                    cv::Point2f pts[3] = {cv::Point2f(approx[0].x, approx[0].y),
+                                          cv::Point2f(approx[1].x, approx[1].y),
+                                          cv::Point2f(approx[2].x, approx[2].y)};
 
-                    auto isRightAngle = [](const cv::Point2f &a, const cv::Point2f &b, const cv::Point2f &c) -> bool {
+                    auto isRightAngle  = [](const cv::Point2f &a, const cv::Point2f &b,
+                                           const cv::Point2f &c) -> bool {
                         cv::Point2f ab(b.x - a.x, b.y - a.y);
                         cv::Point2f ac(c.x - a.x, c.y - a.y);
-                        double dot = ab.x * ac.x + ab.y * ac.y;
+                        double dot   = ab.x * ac.x + ab.y * ac.y;
                         double lenAB = std::sqrt(ab.x * ab.x + ab.y * ab.y);
                         double lenAC = std::sqrt(ac.x * ac.x + ac.y * ac.y);
                         if (lenAB < 1e-6 || lenAC < 1e-6) return false;
@@ -460,14 +459,17 @@ class SquareRingMatch
                     };
 
                     int pivot = -1;
-                    if (isRightAngle(pts[0], pts[1], pts[2]))      pivot = 0;
-                    else if (isRightAngle(pts[1], pts[0], pts[2])) pivot = 1;
-                    else if (isRightAngle(pts[2], pts[0], pts[1])) pivot = 2;
+                    if (isRightAngle(pts[0], pts[1], pts[2]))
+                        pivot = 0;
+                    else if (isRightAngle(pts[1], pts[0], pts[2]))
+                        pivot = 1;
+                    else if (isRightAngle(pts[2], pts[0], pts[1]))
+                        pivot = 2;
 
                     if (pivot >= 0) {
                         geometric_reconstruct = true;
-                        int q = (pivot + 1) % 3;
-                        int r = (pivot + 2) % 3;
+                        int q                 = (pivot + 1) % 3;
+                        int r                 = (pivot + 2) % 3;
                         cv::Point2f D(pts[q].x + pts[r].x - pts[pivot].x,
                                       pts[q].y + pts[r].y - pts[pivot].y);
                         corners_4.push_back(cv::Point2f(pts[pivot].x, pts[pivot].y));
@@ -477,26 +479,33 @@ class SquareRingMatch
                     }
                     else {
                         cv::RotatedRect rrect = cv::minAreaRect(contour);
-                        cv::Point2f box[4]; rrect.points(box);
+                        cv::Point2f box[4];
+                        rrect.points(box);
                         for (int k = 0; k < 4; ++k) corners_4.push_back(box[k]);
                         cv::Rect rbbox = rrect.boundingRect();
-                        float r_aspect = static_cast<float>(rbbox.width) / static_cast<float>(rbbox.height);
+                        float r_aspect =
+                            static_cast<float>(rbbox.width) / static_cast<float>(rbbox.height);
                         if (r_aspect < 0.3f || r_aspect > 3.0f) continue;
                     }
                 }
                 else {
                     cv::RotatedRect rrect = cv::minAreaRect(contour);
-                    cv::Point2f box[4]; rrect.points(box);
+                    cv::Point2f box[4];
+                    rrect.points(box);
                     for (int k = 0; k < 4; ++k) corners_4.push_back(box[k]);
                     cv::Rect rbbox = rrect.boundingRect();
-                    float r_aspect = static_cast<float>(rbbox.width) / static_cast<float>(rbbox.height);
+                    float r_aspect =
+                        static_cast<float>(rbbox.width) / static_cast<float>(rbbox.height);
                     if (r_aspect < 0.3f || r_aspect > 3.0f) continue;
                 }
 
                 // 验证角点在图像内
                 bool ok = true;
                 for (const auto &c : corners_4) {
-                    if (c.x < 0 || c.y < 0 || c.x >= img_w || c.y >= img_h) { ok = false; break; }
+                    if (c.x < 0 || c.y < 0 || c.x >= img_w || c.y >= img_h) {
+                        ok = false;
+                        break;
+                    }
                 }
                 if (!ok) continue;
 
@@ -514,8 +523,8 @@ class SquareRingMatch
             }
 
             if (pass_count > 0) {
-                ROS_DEBUG("[SquareRingMatch] 轮廓fallback: %dx%d膨胀检出 %d 候选",
-                          dsize, dsize, pass_count);
+                ROS_DEBUG("[SquareRingMatch] 轮廓fallback: %dx%d膨胀检出 %d 候选", dsize, dsize,
+                          pass_count);
             }
         }
 
@@ -530,9 +539,9 @@ class SquareRingMatch
         // --- 第4步：按分数降序 (同分则面积大者优先)，取前 N ---
         std::sort(all_candidates.begin(), all_candidates.end(),
                   [](const MatchResult &a, const MatchResult &b) {
-                      if (std::abs(a.score - b.score) > 0.01f)
-                          return a.score > b.score;
-                      return cv::boundingRect(a.corners).area() > cv::boundingRect(b.corners).area();
+                      if (std::abs(a.score - b.score) > 0.01f) return a.score > b.score;
+                      return cv::boundingRect(a.corners).area() >
+                             cv::boundingRect(b.corners).area();
                   });
 
         std::vector<MatchResult> results;
@@ -556,23 +565,30 @@ class SquareRingMatch
 
             for (size_t j = i + 1; j < candidates.size(); ++j) {
                 if (!keep[j]) continue;
-                cv::Rect bj = cv::boundingRect(candidates[j].corners);
+                cv::Rect bj    = cv::boundingRect(candidates[j].corners);
 
                 cv::Rect inter = bi & bj;
                 if (inter.width <= 0 || inter.height <= 0) continue;
 
-                float iou = static_cast<float>(inter.area()) / (bi.area() + bj.area() - inter.area());
+                float iou =
+                    static_cast<float>(inter.area()) / (bi.area() + bj.area() - inter.area());
                 if (iou > 0.3f) {
                     // 保留高分者；同分保留面积小者（更精确）
                     if (candidates[i].score > candidates[j].score + 0.01f) {
                         keep[j] = false;
-                    } else if (candidates[j].score > candidates[i].score + 0.01f) {
+                    }
+                    else if (candidates[j].score > candidates[i].score + 0.01f) {
                         keep[i] = false;
                         break;  // i 被淘汰，跳到下一个 i
-                    } else {
+                    }
+                    else {
                         // 同分 → 保留面积小者（更精确的检测）
-                        if (bi.area() <= bj.area()) keep[j] = false;
-                        else { keep[i] = false; break; }
+                        if (bi.area() <= bj.area())
+                            keep[j] = false;
+                        else {
+                            keep[i] = false;
+                            break;
+                        }
                     }
                 }
             }
@@ -596,42 +612,42 @@ class SquareRingMatch
         if (candidates.size() <= 1) return candidates;
 
         std::vector<MatchResult> merged = candidates;
-        bool changed = true;
+        bool changed                    = true;
 
         while (changed) {
             changed = false;
             for (size_t i = 0; i < merged.size(); ++i) {
-                cv::Rect bi = cv::boundingRect(merged[i].corners);
+                cv::Rect bi  = cv::boundingRect(merged[i].corners);
                 float diag_i = std::sqrt(bi.width * bi.width + bi.height * bi.height);
 
-                for (size_t j = i + 1; j < merged.size(); ) {
-                    cv::Rect bj = cv::boundingRect(merged[j].corners);
-                    float diag_j = std::sqrt(bj.width * bj.width + bj.height * bj.height);
+                for (size_t j = i + 1; j < merged.size();) {
+                    cv::Rect bj    = cv::boundingRect(merged[j].corners);
+                    float diag_j   = std::sqrt(bj.width * bj.width + bj.height * bj.height);
 
                     // 合并条件：bbox 相交 或 中心距 < max(diag_i, diag_j)
                     cv::Rect inter = bi & bj;
-                    bool overlap = (inter.width > 0 && inter.height > 0);
+                    bool overlap   = (inter.width > 0 && inter.height > 0);
 
-                    cv::Point2f ci(bi.x + bi.width/2.0f, bi.y + bi.height/2.0f);
-                    cv::Point2f cj(bj.x + bj.width/2.0f, bj.y + bj.height/2.0f);
-                    float dist = std::sqrt((ci.x - cj.x) * (ci.x - cj.x) +
-                                           (ci.y - cj.y) * (ci.y - cj.y));
+                    cv::Point2f ci(bi.x + bi.width / 2.0f, bi.y + bi.height / 2.0f);
+                    cv::Point2f cj(bj.x + bj.width / 2.0f, bj.y + bj.height / 2.0f);
+                    float dist =
+                        std::sqrt((ci.x - cj.x) * (ci.x - cj.x) + (ci.y - cj.y) * (ci.y - cj.y));
 
                     if (overlap || dist < std::max(diag_i, diag_j)) {
                         // 保护：如果一方完全包含另一方，且被包含者分数更高 → 不合并
                         // （避免大膨胀产生的粗糙框吞噬小核检测到的精确小方框）
-                        bool i_contains_j = (bi.x <= bj.x && bi.y <= bj.y &&
-                                             bi.x + bi.width >= bj.x + bj.width &&
-                                             bi.y + bi.height >= bj.y + bj.height);
-                        bool j_contains_i = (bj.x <= bi.x && bj.y <= bi.y &&
-                                             bj.x + bj.width >= bi.x + bi.width &&
-                                             bj.y + bj.height >= bi.y + bi.height);
-                        if (i_contains_j && merged[j].score > merged[i].score + 0.05f) {
-                            ++j; continue;  // 小精确框 bj 不应被大粗糙框 bi 吞噬
-                        }
-                        if (j_contains_i && merged[i].score > merged[j].score + 0.05f) {
-                            ++j; continue;  // 小精确框 bi 不应被大粗糙框 bj 吞噬
-                        }
+                        // bool i_contains_j = (bi.x <= bj.x && bi.y <= bj.y &&
+                        //                      bi.x + bi.width >= bj.x + bj.width &&
+                        //                      bi.y + bi.height >= bj.y + bj.height);
+                        // bool j_contains_i = (bj.x <= bi.x && bj.y <= bi.y &&
+                        //                      bj.x + bj.width >= bi.x + bi.width &&
+                        //                      bj.y + bj.height >= bi.y + bi.height);
+                        // if (i_contains_j && merged[j].score > merged[i].score + 0.05f) {
+                        //     ++j; continue;  // 小精确框 bj 不应被大粗糙框 bi 吞噬
+                        // }
+                        // if (j_contains_i && merged[i].score > merged[j].score + 0.05f) {
+                        //     ++j; continue;  // 小精确框 bi 不应被大粗糙框 bj 吞噬
+                        // }
 
                         // 合并：取 union bbox 的4角
                         cv::Rect ub = bi | bj;
@@ -648,28 +664,26 @@ class SquareRingMatch
                         }
 
                         std::vector<cv::Point2f> u_corners = {
-                            cv::Point2f(ub.x, ub.y),
-                            cv::Point2f(ub.x + ub.width, ub.y),
+                            cv::Point2f(ub.x, ub.y), cv::Point2f(ub.x + ub.width, ub.y),
                             cv::Point2f(ub.x + ub.width, ub.y + ub.height),
-                            cv::Point2f(ub.x, ub.y + ub.height)
-                        };
+                            cv::Point2f(ub.x, ub.y + ub.height)};
 
                         merged[i].corners = sortCornersClockwise(u_corners);
-                        merged[i].score = std::max(merged[i].score, merged[j].score) * 0.95f;  // 轻微扣分
+                        merged[i].score = std::max(merged[i].score, merged[j].score);  // 轻微扣分
 
-                        ROS_DEBUG("[SquareRingMatch] 碎片合并: (%d,%d %dx%d) + (%d,%d %dx%d) → (%d,%d %dx%d) score=%.2f",
-                                  bi.x, bi.y, bi.width, bi.height,
-                                  bj.x, bj.y, bj.width, bj.height,
-                                  ub.x, ub.y, ub.width, ub.height,
-                                  merged[i].score);
+                        ROS_DEBUG("[SquareRingMatch] 碎片合并: (%d,%d %dx%d) + (%d,%d %dx%d) → "
+                                  "(%d,%d %dx%d) score=%.2f",
+                                  bi.x, bi.y, bi.width, bi.height, bj.x, bj.y, bj.width, bj.height,
+                                  ub.x, ub.y, ub.width, ub.height, merged[i].score);
 
                         merged.erase(merged.begin() + j);
                         changed = true;
                         // 更新 bi，继续检查其他碎片
-                        bi = ub;
-                        diag_i = std::sqrt(bi.width * bi.width + bi.height * bi.height);
+                        bi      = ub;
+                        diag_i  = std::sqrt(bi.width * bi.width + bi.height * bi.height);
                         // j 不变（删除后下一个元素移到 j 位置）
-                    } else {
+                    }
+                    else {
                         ++j;
                     }
                 }
