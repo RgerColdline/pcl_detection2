@@ -163,8 +163,15 @@ class CloudAccumulator
         pnh_.param("roi/z_max", roi_z_max_, 2.0f);
 
         // 配准前ROI: 在ICP之前先ROI过滤，减少背景点对配准的干扰
+        // 边界独立于方环检测ROI，未设置时回退到 roi/ 对应值
         pnh_.param("pre_register_roi/enabled", pre_register_roi_enabled_, true);
         pnh_.param("pre_register_roi/min_points", pre_register_roi_min_points_, 20);
+        pnh_.param("pre_register_roi/x_min", pre_roi_x_min_, roi_x_min_);
+        pnh_.param("pre_register_roi/x_max", pre_roi_x_max_, roi_x_max_);
+        pnh_.param("pre_register_roi/y_min", pre_roi_y_min_, roi_y_min_);
+        pnh_.param("pre_register_roi/y_max", pre_roi_y_max_, roi_y_max_);
+        pnh_.param("pre_register_roi/z_min", pre_roi_z_min_, roi_z_min_);
+        pnh_.param("pre_register_roi/z_max", pre_roi_z_max_, roi_z_max_);
 
         pnh_.param("dilation/radius", dilation_radius_, 0.25);
         pnh_.param("dilation/steps", dilation_steps_, 12);
@@ -178,8 +185,8 @@ class CloudAccumulator
             livox_roi_uav_radius_, roi_x_min_, roi_x_max_, roi_y_min_, roi_y_max_, roi_z_min_,
             roi_z_max_);
         pre_register_crop_box_ = std::make_unique<pcl_detection2::core::CropBoxRoi<PointT>>(
-            livox_roi_uav_radius_, roi_x_min_, roi_x_max_, roi_y_min_, roi_y_max_, roi_z_min_,
-            roi_z_max_);
+            livox_roi_uav_radius_, pre_roi_x_min_, pre_roi_x_max_, pre_roi_y_min_, pre_roi_y_max_,
+            pre_roi_z_min_, pre_roi_z_max_);
         register_ = std::make_unique<RegisterT>(
             register_max_correspondence_distance_, register_max_iter_,
             register_transformation_epsilon_, register_euclidean_fitness_epsilon_);
@@ -298,12 +305,13 @@ class CloudAccumulator
                         rotation_delta_deg <= register_max_rotation_delta_deg_;
 
                     if (registration_accepted) {
-                        *aligned_livox_cloud_ = *registration_result.aligned_cloud;
-                        // LiDAR→世界 = 配准修正(世界→世界) * 里程计预测(LiDAR→世界)
-                        last_map_pose_ = registration_result.final_transform * predicted_pose;
+                        // ICP用ROI点云配准得到修正矩阵，但全量点云按修正变换写入地图
+                        pcl::transformPointCloud(*predicted_livox_cloud_, *aligned_livox_cloud_,
+                                                 correction_delta);
+                        last_map_pose_ = correction_delta * predicted_pose;
                     }
                     else {
-                        *aligned_livox_cloud_ = *icp_source;
+                        *aligned_livox_cloud_ = *predicted_livox_cloud_;
                         last_map_pose_        = predicted_pose;
                         ROS_WARN_THROTTLE(
                             1,
@@ -313,7 +321,7 @@ class CloudAccumulator
                     }
                 }
                 else {
-                    *aligned_livox_cloud_ = *icp_source;
+                    *aligned_livox_cloud_ = *predicted_livox_cloud_;
                     last_map_pose_        = predicted_pose;
                     ROS_WARN_THROTTLE(1, "配准子图点数不足 (%zu < %d)，跳过ICP，使用里程计预测位姿",
                                       registrationSubmapForICP()->size(),
@@ -321,7 +329,7 @@ class CloudAccumulator
                 }
             }
             else {
-                *aligned_livox_cloud_ = *icp_source;
+                *aligned_livox_cloud_ = *predicted_livox_cloud_;
                 last_map_pose_        = predicted_pose;
                 ROS_WARN_THROTTLE(1, "局部地图为空，使用里程计预测位姿");
             }
@@ -352,16 +360,14 @@ class CloudAccumulator
         publishProjectedCloud(livox_msg->header);
         publishPredictedCloud(livox_msg->header);
         publishRoiPredictedCloud(livox_msg->header);
-        if (timing_enable_) {
-            timing.mark("publish");
-            logTimingReport(timing);
-        }
+        if (timing_enable_) timing.mark("publish");
 
         // 方环检测 (每5帧运行一次以节省算力)
         ++ring_detect_frame_counter_;
         if (ring_detect_frame_counter_ % 5 == 0 && !downsampled_local_map_cloud_->empty()) {
             ring_extractor_.processCloud(downsampled_local_map_cloud_);
         }
+        if (timing_enable_) timing.mark("ring_detect");
 
         // 柱子检测：收到start信号后逐帧匹配，匹配到自动停止
         if (pillar_detect_active_ && !downsampled_registration_map_cloud_->empty()) {
@@ -374,6 +380,9 @@ class CloudAccumulator
                 ROS_INFO("[Pillar] 检测完成 case=%d, 自动停止匹配", result.case_id);
             }
         }
+        if (timing_enable_) timing.mark("pillar_detect");
+
+        if (timing_enable_) logTimingReport(timing);
     }
 
   private:
@@ -728,6 +737,10 @@ class CloudAccumulator
     float roi_y_max_;
     float roi_z_min_;
     float roi_z_max_;
+    // 配准前ROI独立边界（默认回退到 roi_ 对应值）
+    float pre_roi_x_min_, pre_roi_x_max_;
+    float pre_roi_y_min_, pre_roi_y_max_;
+    float pre_roi_z_min_, pre_roi_z_max_;
     bool pre_register_roi_enabled_;
     int pre_register_roi_min_points_;
     double dilation_radius_;

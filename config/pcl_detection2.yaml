@@ -41,10 +41,16 @@ roi:
   z_max: 1.5
 
 # ── 配准前ROI：在ICP配准之前先用ROI裁剪世界坐标点云，减少无关背景点干扰 ──
-# 使用与 obstacle ROI 相同的 x/y/z 范围
+# 未指定时默认沿用上方 roi: 的对应值
 pre_register_roi:
-  enabled: true          # 启用配准前ROI
+  enabled: true         # 配准计算变换矩阵之前是否先roi
   min_points: 20         # ROI后最少点数，低于此回退全量点云
+  # x_min: -3.25         # 不设则用 roi/x_min
+  # x_max: 0.55
+  # y_min: -3.15
+  # y_max: 0.65
+  # z_min: 0.3
+  # z_max: 1.5
 
 dilation:
   radius: 0
@@ -68,8 +74,8 @@ ring_pipeline:
 ring_plane:
   # ROI (平面提取前的裁剪范围，世界坐标系)
   roi_x_min: -2.0
-  roi_x_max: 0.0
-  roi_y_min: -1.25
+  roi_x_max: -0.5
+  roi_y_min: -1.00
   roi_y_max: 1.25
   roi_z_min: -0.15
   roi_z_max: 3.25
@@ -132,7 +138,7 @@ ring_match:
   min_hole_ratio: 0.3
 
   # 轮廓检测 fallback
-  expected_size_min: 20
+  expected_size_min: 100
   expected_size_max: 400
   contour_area_ratio_min: 0.5
 
