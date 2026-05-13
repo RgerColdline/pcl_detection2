@@ -77,6 +77,15 @@ class ExtractSquareRing
         pnh_.param("ring_pipeline/ring_half_thickness", ring_half_thickness_, 0.25f);
         pnh_.param("ring_pipeline/dump_enabled", dump_enabled_, false);
 
+        // 环3D位置过滤器参数
+        pnh_.param("ring_filter/enabled", ring_filter_enabled_, false);
+        pnh_.param("ring_filter/x_min", ring_filter_x_min_, -2.0f);
+        pnh_.param("ring_filter/x_max", ring_filter_x_max_, -0.3f);
+        pnh_.param("ring_filter/y_min", ring_filter_y_min_, -0.4f);
+        pnh_.param("ring_filter/y_max", ring_filter_y_max_, 0.4f);
+        pnh_.param("ring_filter/z_min", ring_filter_z_min_, 0.5f);
+        pnh_.param("ring_filter/z_max", ring_filter_z_max_, 2.0f);
+
         // --- ROS 通信 ---
         cloud_sub_ =
             nh_.subscribe(input_cloud_topic_, 1, &ExtractSquareRing::cloudCallback, this);
@@ -267,6 +276,23 @@ class ExtractSquareRing
                                  rc.score, rc.plane_idx);
                     }
                     continue;
+                }
+
+                // 环3D位置过滤（世界坐标系）
+                if (ring_filter_enabled_) {
+                    float cx = ring_3d.center.x();
+                    float cy = ring_3d.center.y();
+                    float cz = ring_3d.center.z();
+                    if (cx < ring_filter_x_min_ || cx > ring_filter_x_max_ ||
+                        cy < ring_filter_y_min_ || cy > ring_filter_y_max_ ||
+                        cz < ring_filter_z_min_ || cz > ring_filter_z_max_) {
+                        if (is_best) {
+                            ROS_WARN("[ExtractSquareRing] 最佳候选超出位置范围: "
+                                     "center=(%.2f,%.2f,%.2f) score=%.4f",
+                                     cx, cy, cz, rc.score);
+                        }
+                        continue;
+                    }
                 }
 
                 // 添加到总 marker array (最佳=金色, 其他=半透明绿)
@@ -577,6 +603,15 @@ class ExtractSquareRing
     bool publish_debug_cloud_   = true;
     int max_planes_             = 2;
     float ring_half_thickness_  = 0.25f;
+
+    // 环3D位置过滤器
+    bool ring_filter_enabled_   = false;
+    float ring_filter_x_min_    = -2.0f;
+    float ring_filter_x_max_    = -0.3f;
+    float ring_filter_y_min_    = -0.4f;
+    float ring_filter_y_max_    = 0.4f;
+    float ring_filter_z_min_    = 0.5f;
+    float ring_filter_z_max_    = 2.0f;
 
     // ---- 临时调试: 延时保存投影图 ----
     ros::Time dump_start_time_;
