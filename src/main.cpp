@@ -58,9 +58,7 @@ class CloudAccumulator
         int frame_count = 0;
 
         void addFrame(const TimingReport &timing) {
-            if (stage_sum_ms.empty()) {
-                stage_sum_ms = timing.stages_ms;
-            }
+            if (stage_sum_ms.empty()) { stage_sum_ms = timing.stages_ms; }
             else {
                 const std::size_t count = std::min(stage_sum_ms.size(), timing.stages_ms.size());
                 for (std::size_t i = 0; i < count; ++i) {
@@ -118,10 +116,10 @@ class CloudAccumulator
             nh_.advertise<sensor_msgs::PointCloud2>("/pcl_detection2/eroded_accumulated_cloud", 1);
         projected_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
             "/pcl_detection2/projected_accumulated_cloud", 1);
-        predicted_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
-            "/pcl_detection2/predicted_cloud", 1);
-        roi_predicted_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
-            "/pcl_detection2/roi_predicted_cloud", 1);
+        predicted_cloud_pub_ =
+            nh_.advertise<sensor_msgs::PointCloud2>("/pcl_detection2/predicted_cloud", 1);
+        roi_predicted_pub_ =
+            nh_.advertise<sensor_msgs::PointCloud2>("/pcl_detection2/roi_predicted_cloud", 1);
 
         pnh_.param("initial_enable", pcl_enable_, false);
         nh_.setParam("/pcl_enable", pcl_enable_);
@@ -434,9 +432,7 @@ class CloudAccumulator
         frames_since_map_rebuild_ = 0;
 
         local_map_cloud_->clear();
-        for (const auto &frame : local_map_frames_) {
-            *local_map_cloud_ += *frame;
-        }
+        for (const auto &frame : local_map_frames_) { *local_map_cloud_ += *frame; }
 
         voxel_filter_->filterCloud(local_map_cloud_, downsampled_local_map_cloud_,
                                    VoxelFilterT::Mode::ACCUMULATE);
@@ -457,9 +453,7 @@ class CloudAccumulator
         }
 
         registration_map_cloud_->clear();
-        for (const auto &frame : registration_map_frames_) {
-            *registration_map_cloud_ += *frame;
-        }
+        for (const auto &frame : registration_map_frames_) { *registration_map_cloud_ += *frame; }
 
         voxel_filter_->filterCloud(registration_map_cloud_, downsampled_registration_map_cloud_,
                                    VoxelFilterT::Mode::ACCUMULATE);
@@ -494,9 +488,7 @@ class CloudAccumulator
     void updateObstacleCloud() {
         roi_filtered_cloud_->clear();
         eroded_cloud_->clear();
-        if (dilation_radius_ > 0) {
-            dilated_cloud_->clear();
-        }
+        if (dilation_radius_ > 0) { dilated_cloud_->clear(); }
         projected_cloud_->clear();
 
         if (downsampled_local_map_cloud_->empty()) return;

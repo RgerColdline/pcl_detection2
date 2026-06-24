@@ -105,8 +105,20 @@ class SquareRingMatch
 
         if (projected_image.empty()) return results;
 
+        // ---- Step 0: 形态学闭合，填充 LiDAR 点云稀疏导致的空隙 ----
+        // 投影二值图来自 LiDAR 点云，因为点云稀疏 + 累积偏移，
+        // 方环边界上往往有很多孔洞和断裂，需要用较大核闭合。
+        cv::Mat closed_img;
+        cv::Mat morph_kernel = cv::getStructuringElement(
+            cv::MORPH_RECT, cv::Size(morphology_kernel_size_, morphology_kernel_size_));
+        cv::morphologyEx(projected_image, closed_img, cv::MORPH_CLOSE, morph_kernel);
+        if (morphology_kernel_size_ > 3) {
+            // 大核闭合后可能过度膨胀，用同样核做一次 OPEN 恢复尺寸
+            cv::morphologyEx(closed_img, closed_img, cv::MORPH_OPEN, morph_kernel);
+        }
+
         // ---- 放大过小的投影图，使环孔洞像素尺寸追上模板 ----
-        cv::Mat work_img = projected_image;
+        cv::Mat work_img = closed_img;
         double img_scale = 1.0;
         int min_side     = std::min(projected_image.cols, projected_image.rows);
         if (min_side > 0 && min_side < 200) {

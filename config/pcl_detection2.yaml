@@ -9,7 +9,7 @@ livox_roi:
   debug_level: 0
 
 voxel:
-  leaf_size: 0.05
+  leaf_size: 0.03                         # 减小体素，保留更多点云细节
 
 map:
   decay_coeff: 0.02
@@ -112,30 +112,31 @@ ring_match:
   # 不设置则统一使用 match_threshold
   template_thresholds: []
 
-  match_threshold: 0.45
+  match_threshold: 0.35                  # 降低，允许不完美的环被检出
   match_method: 5                        # TM_CCOEFF_NORMED
 
-  # 多尺度匹配参数 (±20%, 与参考实现一致)
-  scale_x_min: 0.8
-  scale_x_max: 1.2
+  # 多尺度匹配参数 (±30%, 更宽松的尺度容差)
+  scale_x_min: 0.7
+  scale_x_max: 1.3
   scale_x_step: 0.05
-  scale_y_min: 0.8
-  scale_y_max: 1.2
+  scale_y_min: 0.7
+  scale_y_max: 1.3
   scale_y_step: 0.05
 
   # NMS
   nms_iou_threshold: 0.3
 
   # 形态学核大小 (填充稀疏LiDAR投影的缝隙)
-  morphology_kernel_size: 5
+  # 点云噪点/偏移导致环边界有空洞，需用较大核做 CLOSE 填满
+  # 0.05m/pixel × 9 = 0.45m，能填大多数空隙又不至于堵死孔洞
+  morphology_kernel_size: 9
 
   # 每张投影图最大检测环数
   max_rings_per_image: 3
 
-  # 环孔洞验证：消除实墙误匹配
-  # 匹配区域中心至少要有这么多比例的黑像素(孔洞)，否则视为实墙丢弃
-  # 取值范围 0.0~1.0，0.3 表示中心至少 30% 是空的
-  min_hole_ratio: 0.3
+  # 环孔洞验证：排除实墙误匹配
+  # 加大核后环可能被轻微填充，降低阈值避免误杀
+  min_hole_ratio: 0.2
 
   # 轮廓检测 fallback
   expected_size_min: 100
