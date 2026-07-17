@@ -1,5 +1,8 @@
 initial_enable: true
 
+# 点云数据源: "livox"=旧Livox管线(需ICP配准)  "fastlio"=FAST-LIO2订阅
+cloud_source: "fastlio"
+
 debug:
   timing_enable: true
 
