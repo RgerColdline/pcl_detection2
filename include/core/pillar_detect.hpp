@@ -14,6 +14,8 @@
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 
+#include <Eigen/Dense>
+
 #include <algorithm>
 #include <cmath>
 #include <sstream>
@@ -26,12 +28,20 @@ namespace core
 {
 
 /**
- * @brief 柱子位置组合检测
+ * @brief 柱子位置组合检测（模板匹配 + 坐标验证）
  *
- * 将ROI点云投影到Z平面为二值图，与4个预先生成的柱子位置模板匹配，
- * 返回最佳匹配的配置编号（0-3）。
+ * 将ROI点云投影到Z平面为二值图，与4个预生成模板匹配后，
+ * 再用实际点云在柱子固定位置上的分布做坐标验证，排除模板匹配的误检。
  *
- * 模板文件: templates/pillar_case_00~03.png (26x53, 白圆点=柱子位置)
+ * 柱子只有4个可能位置（来自 pillar_nav.yaml）：
+ *   p1_pos1(-2.05,-0.80)  p1_pos2(-2.65,-0.80)
+ *   p2_pos1(-2.05,-2.05)  p2_pos2(-2.65,-2.05)
+ *
+ * 每种case对应哪些位置有柱子：
+ *   case_00: p1_pos1
+ *   case_01: p1_pos2 + p2_pos2
+ *   case_02: p1_pos1 + p2_pos2
+ *   case_03: p1_pos2 + p2_pos1
  */
 class PillarDetect
 {
@@ -60,11 +70,24 @@ class PillarDetect
         pnh.param("pillar_roi/z_max", roi_z_max_, 1.5f);
         pnh.param("pillar_roi/resolution", resolution_, 0.05f);
         pnh.param("pillar_roi/match_threshold", match_threshold_, 0.3f);
-        // 模板匹配放大: proj_scale > tpl_scale 给matchTemplate留滑动空间
         pnh.param("pillar_roi/proj_upscale", proj_upscale_, 3);
         pnh.param("pillar_roi/tpl_upscale", tpl_upscale_, 2);
 
-        // 计算投影图尺寸 (用 +0.5f 避免浮点截断，如 1.3/0.05=25.999→26)
+        // 加载4个柱子坐标（世界坐标，与 pillar_nav.yaml 一致）
+        auto load_pos = [&](const std::string &key, Eigen::Vector2f &pos) {
+            std::vector<double> val;
+            pnh.getParam("pillar_pos/" + key, val);
+            if (val.size() >= 2) {
+                pos.x() = static_cast<float>(val[0]);
+                pos.y() = static_cast<float>(val[1]);
+            }
+        };
+        load_pos("p1_pos1", pillar_world_[0]);
+        load_pos("p1_pos2", pillar_world_[1]);
+        load_pos("p2_pos1", pillar_world_[2]);
+        load_pos("p2_pos2", pillar_world_[3]);
+
+        // 计算投影图尺寸
         img_cols_ = std::max(1, static_cast<int>((roi_x_max_ - roi_x_min_) / resolution_ + 0.5f));
         img_rows_ = std::max(1, static_cast<int>((roi_y_max_ - roi_y_min_) / resolution_ + 0.5f));
 
@@ -74,12 +97,14 @@ class PillarDetect
                                               "pillar_case_02.png", "pillar_case_03.png"};
         templates_                         = loader.load(tpl_paths);
 
-        ROS_INFO("[PillarDetect] 初始化完成: ROI=%.1f~%.1f x %.1f~%.1f, 图=%dx%d→%dx%d(proj) "
-                 "%dx%d(tpl), "
-                 "模板=%zu",
+        ROS_INFO("[PillarDetect] 初始化完成: ROI=%.1f~%.1f x %.1f~%.1f, 图=%dx%d, 模板=%zu",
                  roi_x_min_, roi_x_max_, roi_y_min_, roi_y_max_, img_cols_, img_rows_,
-                 img_cols_ * proj_upscale_, img_rows_ * proj_upscale_, img_cols_ * tpl_upscale_,
-                 img_rows_ * tpl_upscale_, templates_.size());
+                 templates_.size());
+        ROS_INFO("[PillarDetect] 柱子坐标验证: p1_pos1(%.2f,%.2f) p1_pos2(%.2f,%.2f) "
+                 "p2_pos1(%.2f,%.2f) p2_pos2(%.2f,%.2f)",
+                 pillar_world_[0].x(), pillar_world_[0].y(), pillar_world_[1].x(),
+                 pillar_world_[1].y(), pillar_world_[2].x(), pillar_world_[2].y(),
+                 pillar_world_[3].x(), pillar_world_[3].y());
     }
 
     Result detect(const ConstPtr &cloud) {
@@ -126,9 +151,12 @@ class PillarDetect
                    cv::INTER_NEAREST);
         cv::threshold(proj_scaled, proj_scaled, 127, 255, cv::THRESH_BINARY);
 
-        float best_score = match_threshold_;
-        int best_id      = -1;
-        std::string score_detail;
+        // Step 5: 模板匹配，按得分降序排列候选
+        struct Candidate {
+            int id;
+            float score;
+        };
+        std::vector<Candidate> candidates;
         for (size_t t = 0; t < templates_.size(); ++t) {
             cv::Mat tpl_scaled;
             cv::resize(templates_[t], tpl_scaled, cv::Size(), tpl_upscale_, tpl_upscale_,
@@ -138,40 +166,119 @@ class PillarDetect
             cv::Mat match_res;
             cv::matchTemplate(proj_scaled, tpl_scaled, match_res, cv::TM_CCOEFF_NORMED);
 
-            // 取整张结果图的最大值 (模板小于图时有多个滑动位置)
             double max_val;
             cv::minMaxLoc(match_res, nullptr, &max_val);
             float score = static_cast<float>(max_val);
-            char buf[32];
-            snprintf(buf, sizeof(buf), " t%zu=%.3f", t, score);
-            score_detail += buf;
-            if (score > best_score) {
-                best_score = score;
-                best_id    = static_cast<int>(t);
+            if (score >= match_threshold_) {
+                candidates.push_back({static_cast<int>(t), score});
             }
+        }
+        // 按得分降序排列
+        std::sort(candidates.begin(), candidates.end(),
+                  [](const Candidate &a, const Candidate &b) { return a.score > b.score; });
+
+        std::string score_detail;
+        for (const auto &c : candidates) {
+            char buf[32];
+            snprintf(buf, sizeof(buf), " t%d=%.3f", c.id, c.score);
+            score_detail += buf;
         }
 
         ROS_INFO_THROTTLE(1.0,
-                          "[Pillar] ROI点=%zu 白点=%d/%d 原图=%dx%d scale=%d/%d 模板=%zu "
-                          "阈值=%.2f 得分:%s",
+                          "[Pillar] ROI点=%zu 白点=%d/%d 原图=%dx%d 阈值=%.2f 候选:%s",
                           roi_cloud->size(), cv::countNonZero(proj_img), img_rows_ * img_cols_,
-                          img_cols_, img_rows_, proj_upscale_, tpl_upscale_, templates_.size(),
-                          match_threshold_, score_detail.c_str());
+                          img_cols_, img_rows_, match_threshold_, score_detail.c_str());
 
-        if (best_id >= 0) {
-            result.case_id  = best_id;
-            result.score    = best_score;
+        // Step 6: 坐标验证——对每个候选，按实际点云分布确认
+        int accepted_id = -1;
+        float accepted_score = 0.0f;
+        for (const auto &c : candidates) {
+            float mismatches = verifyByCoordinates(proj_img, c.id);
+            if (mismatches <= kMaxMismatchAccept_) {
+                accepted_id    = c.id;
+                accepted_score = c.score;
+                if (mismatches > 0.0f) {
+                    ROS_WARN("[Pillar] case=%d score=%.3f 坐标偏差=%.1f，仍接受",
+                             c.id, c.score, mismatches);
+                } else {
+                    ROS_INFO("[Pillar] case=%d score=%.3f 坐标完全吻合", c.id, c.score);
+                }
+                break;
+            } else {
+                ROS_WARN("[Pillar] case=%d score=%.3f 坐标偏差=%.1f，跳过",
+                         c.id, c.score, mismatches);
+            }
+        }
+
+        if (accepted_id >= 0) {
+            result.case_id  = accepted_id;
+            result.score    = accepted_score;
             result.detected = true;
-            ROS_INFO("[Pillar] ★ 检测成功 case=%d score=%.3f", best_id, best_score);
+            ROS_INFO("[Pillar] ★ 检测成功 case=%d score=%.3f", accepted_id, accepted_score);
         }
 
         // ---- dump投影图、ROI点云、全量地图点云到temp ----
-        dumpProjection(proj_img, *roi_cloud, *cloud, best_id, best_score);
+        dumpProjection(proj_img, *roi_cloud, *cloud, accepted_id, accepted_score);
 
         return result;
     }
 
   private:
+    // 每个位置应该有空还是有柱子: [case_id][pos_idx] = true=有柱子
+    // pos_idx: 0=p1_pos1 1=p1_pos2 2=p2_pos1 3=p2_pos2
+    static constexpr bool kPillarPattern_[4][4] = {
+        {true, false, false, false},  // case_00: p1_pos1 only
+        {false, true, false, true},   // case_01: p1_pos2 + p2_pos2
+        {true, false, false, true},   // case_02: p1_pos1 + p2_pos2
+        {false, true, true, false},   // case_03: p1_pos2 + p2_pos1
+    };
+    static constexpr float kMaxMismatchAccept_ = 1.0f;  // 最大可接受偏差分
+
+    /**
+     * @brief 坐标验证：检查投影图上每个柱子位置的白像素数是否符合预期
+     * @return 偏差总分（0=完美，>0 有偏差）
+     */
+    float verifyByCoordinates(const cv::Mat &proj_img, int case_id) const {
+        if (case_id < 0 || case_id >= 4) return 999.0f;
+
+        float inv_res = 1.0f / resolution_;
+        float mismatches = 0.0f;
+        std::string detail;
+
+        for (int i = 0; i < 4; ++i) {
+            // 世界坐标 → 像素坐标
+            int col = static_cast<int>((pillar_world_[i].x() - roi_x_min_) * inv_res);
+            int row = static_cast<int>((pillar_world_[i].y() - roi_y_min_) * inv_res);
+            if (col < 0 || col >= img_cols_ || row < 0 || row >= img_rows_) continue;
+
+            // 统计半径2内的白像素数
+            int white_count = 0;
+            int r_min = std::max(0, row - 2), r_max = std::min(img_rows_ - 1, row + 2);
+            int c_min = std::max(0, col - 2), c_max = std::min(img_cols_ - 1, col + 2);
+            for (int r = r_min; r <= r_max; ++r) {
+                for (int c = c_min; c <= c_max; ++c) {
+                    if (proj_img.at<uint8_t>(r, c) == 255) ++white_count;
+                }
+            }
+
+            bool expect_pillar = kPillarPattern_[case_id][i];
+            char buf[64];
+            if (expect_pillar && white_count < 2) {
+                mismatches += 1.0f;
+                snprintf(buf, sizeof(buf), " pos%d=%d(expected>1)", i, white_count);
+            } else if (!expect_pillar && white_count > 4) {
+                mismatches += 0.5f;
+                snprintf(buf, sizeof(buf), " pos%d=%d(expected<=4)", i, white_count);
+            } else {
+                snprintf(buf, sizeof(buf), " pos%d=%d(ok)", i, white_count);
+            }
+            detail += buf;
+        }
+
+        ROS_INFO("[Pillar] 验证 case=%d mismatch=%.1f:%s", case_id, mismatches, detail.c_str());
+        return mismatches;
+    }
+
     void dumpProjection(const cv::Mat &proj_img, const PointCloudT &roi_cloud,
                         const PointCloudT &full_cloud, int best_id, float best_score) {
         static int dump_count  = 0;
@@ -181,7 +288,6 @@ class PillarDetect
         if (dump_count >= 3) return;
 
         ++frame_count;
-        // 每5帧保存一次，共3次
         if (frame_count < 3 || (frame_count % 5) != 0) return;
 
         if (save_dir.empty()) {
@@ -189,20 +295,17 @@ class PillarDetect
             mkdir(save_dir.c_str(), 0755);
         }
 
-        // 转BGR，画模板覆盖
         cv::Mat vis;
         cv::cvtColor(proj_img, vis, cv::COLOR_GRAY2BGR);
 
-        // 高亮最佳匹配模板
         if (best_id >= 0 && best_id < static_cast<int>(templates_.size())) {
             for (int r = 0; r < vis.rows; ++r) {
                 for (int c = 0; c < vis.cols; ++c) {
                     if (templates_[best_id].at<uint8_t>(r, c) == 255) {
                         if (proj_img.at<uint8_t>(r, c) == 255) {
-                            vis.at<cv::Vec3b>(r, c) = cv::Vec3b(0, 255, 0);  // 命中=绿
-                        }
-                        else {
-                            vis.at<cv::Vec3b>(r, c) = cv::Vec3b(255, 0, 0);  // 模板有投影无=蓝
+                            vis.at<cv::Vec3b>(r, c) = cv::Vec3b(0, 255, 0);
+                        } else {
+                            vis.at<cv::Vec3b>(r, c) = cv::Vec3b(255, 0, 0);
                         }
                     }
                 }
@@ -214,7 +317,6 @@ class PillarDetect
               << best_id << "_s" << int(best_score * 100) << ".png";
         cv::imwrite(fname.str(), vis);
 
-        // 同步保存ROI点云和全量地图点云为PCD
         std::ostringstream pcd_fname;
         pcd_fname << save_dir << "/pillar_dump_" << dump_count << "_f" << frame_count << ".pcd";
         pcl::io::savePCDFileBinary(pcd_fname.str(), roi_cloud);
@@ -222,9 +324,7 @@ class PillarDetect
         full_fname << save_dir << "/pillar_dump_" << dump_count << "_f" << frame_count
                    << "_full.pcd";
         pcl::io::savePCDFileBinary(full_fname.str(), full_cloud);
-        ROS_INFO("[Pillar] dump #%d: %s + %s (%zu pts) + %s (%zu pts)", dump_count + 1,
-                 fname.str().c_str(), pcd_fname.str().c_str(), roi_cloud.size(),
-                 full_fname.str().c_str(), full_cloud.size());
+        ROS_INFO("[Pillar] dump #%d: %s + pcd", dump_count + 1, fname.str().c_str());
         ++dump_count;
     }
 
@@ -233,10 +333,18 @@ class PillarDetect
     float roi_z_min_ = 0.3f, roi_z_max_ = 1.5f;
     float resolution_      = 0.05f;
     float match_threshold_ = 0.3f;
-    int proj_upscale_      = 3;  // 投影图放大倍数 (大于tpl_upscale以提供滑动空间)
-    int tpl_upscale_       = 2;  // 模板放大倍数
+    int proj_upscale_      = 3;
+    int tpl_upscale_       = 2;
     int img_cols_ = 0, img_rows_ = 0;
     std::vector<cv::Mat> templates_;
+
+    // 4个柱子位置的世界坐标（从YAML pillar_pos/ 加载）
+    Eigen::Vector2f pillar_world_[4] = {
+        Eigen::Vector2f(-2.05f, -0.80f),
+        Eigen::Vector2f(-2.65f, -0.80f),
+        Eigen::Vector2f(-2.05f, -2.05f),
+        Eigen::Vector2f(-2.65f, -2.05f),
+    };
 };
 
 }  // namespace core
