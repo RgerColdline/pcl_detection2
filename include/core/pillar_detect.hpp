@@ -48,6 +48,12 @@ class PillarDetect
         bool detected = false;
     };
 
+    struct PillarPosition
+    {
+        float x = 0.0f;
+        float y = 0.0f;
+    };
+
     PillarDetect() = default;
 
     void init(ros::NodeHandle &pnh) {
@@ -67,6 +73,25 @@ class PillarDetect
         // 计算投影图尺寸 (用 +0.5f 避免浮点截断，如 1.3/0.05=25.999→26)
         img_cols_ = std::max(1, static_cast<int>((roi_x_max_ - roi_x_min_) / resolution_ + 0.5f));
         img_rows_ = std::max(1, static_cast<int>((roi_y_max_ - roi_y_min_) / resolution_ + 0.5f));
+
+        // 密度检测参数
+        pnh.param("pillar_roi/density_check_enabled", density_check_enabled_, true);
+        pnh.param("pillar_roi/density_check_radius", density_check_radius_, 0.25f);
+        pnh.param("pillar_roi/density_min_points", density_min_points_, 5);
+        pnh.param("pillar_roi/density_weight", density_weight_, 0.3f);
+
+        // 从 YAML 读 4 个候选柱位 (odom 系)
+        auto loadPillarPos = [&](const std::string &key, PillarPosition &pos) {
+            std::vector<double> v;
+            if (pnh.getParam("pillar_pos/" + key, v) && v.size() >= 2) {
+                pos.x = static_cast<float>(v[0]);
+                pos.y = static_cast<float>(v[1]);
+            }
+        };
+        loadPillarPos("p1_pos1", pillar_pos_[0]);  // A左
+        loadPillarPos("p1_pos2", pillar_pos_[1]);  // A右
+        loadPillarPos("p2_pos1", pillar_pos_[2]);  // B左
+        loadPillarPos("p2_pos2", pillar_pos_[3]);  // B右
 
         // 从文件加载4个模板
         TemplateLoader loader("pcl_detection2");
@@ -120,14 +145,13 @@ class PillarDetect
         cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
         cv::dilate(proj_img, proj_img, kernel);
 
-        // Step 4: 放大投影图和模板 → matchTemplate有滑动空间
+        // Step 4: 模板匹配 — 先记录 4 个 case 的裸分
         cv::Mat proj_scaled;
         cv::resize(proj_img, proj_scaled, cv::Size(), proj_upscale_, proj_upscale_,
                    cv::INTER_NEAREST);
         cv::threshold(proj_scaled, proj_scaled, 127, 255, cv::THRESH_BINARY);
 
-        float best_score = match_threshold_;
-        int best_id      = -1;
+        float match_scores[4]  = {0, 0, 0, 0};
         std::string score_detail;
         for (size_t t = 0; t < templates_.size(); ++t) {
             cv::Mat tpl_scaled;
@@ -138,16 +162,29 @@ class PillarDetect
             cv::Mat match_res;
             cv::matchTemplate(proj_scaled, tpl_scaled, match_res, cv::TM_CCOEFF_NORMED);
 
-            // 取整张结果图的最大值 (模板小于图时有多个滑动位置)
             double max_val;
             cv::minMaxLoc(match_res, nullptr, &max_val);
-            float score = static_cast<float>(max_val);
+            match_scores[t] = static_cast<float>(max_val);
             char buf[32];
-            snprintf(buf, sizeof(buf), " t%zu=%.3f", t, score);
+            snprintf(buf, sizeof(buf), " t%zu=%.3f", t, match_scores[t]);
             score_detail += buf;
-            if (score > best_score) {
-                best_score = score;
-                best_id    = static_cast<int>(t);
+        }
+
+        // Step 4.5: 密度评分 — 统计各 case 柱位半径内的 ROI 点数
+        float density_scores[4] = {0, 0, 0, 0};
+        if (density_check_enabled_) {
+            computeDensityScores(*roi_cloud, density_scores);
+        }
+
+        // Step 5: 合成最终得分 = 模板匹配 × (1 + density_weight × 密度)
+        float best_score = match_threshold_;
+        int best_id      = -1;
+        for (int t = 0; t < 4; ++t) {
+            float final_score =
+                match_scores[t] * (1.0f + density_weight_ * density_scores[t]);
+            if (final_score > best_score) {
+                best_score = final_score;
+                best_id    = t;
             }
         }
 
@@ -162,7 +199,8 @@ class PillarDetect
             result.case_id  = best_id;
             result.score    = best_score;
             result.detected = true;
-            ROS_INFO("[Pillar] ★ 检测成功 case=%d score=%.3f", best_id, best_score);
+            ROS_INFO("[Pillar] ★ 检测成功 case=%d match=%.3f density=%.3f final=%.3f",
+                     best_id, match_scores[best_id], density_scores[best_id], best_score);
         }
 
         // ---- dump投影图、ROI点云、全量地图点云到temp ----
@@ -172,6 +210,52 @@ class PillarDetect
     }
 
   private:
+    /**
+     * @brief 对 ROI 点云计算 4 个 case 的密度得分 (0~1 归一化)
+     *
+     * 统计每个候选柱位半径内的点数，按 case 组合两个柱位求和，取最高密度归一化。
+     * pillar_pos_ 映射：0=A左 1=A右 2=B左 3=B右
+     * case 映射：0=(0,2) 1=(0,3) 2=(1,2) 3=(1,3)
+     */
+    void computeDensityScores(const PointCloudT &roi_cloud, float scores[4]) const {
+        // 与 pcl_detection2.yaml / traverse_map.yaml 一致的 case→柱位映射
+        static const int CASE_PILLARS[4][2] = {{0, 2}, {0, 3}, {1, 2}, {1, 3}};
+
+        // 统计 4 个候选柱位半径内的点数
+        int counts[4] = {0, 0, 0, 0};
+        float r2      = density_check_radius_ * density_check_radius_;
+
+        for (const auto &pt : roi_cloud.points) {
+            for (int i = 0; i < 4; ++i) {
+                float dx = pt.x - pillar_pos_[i].x;
+                float dy = pt.y - pillar_pos_[i].y;
+                if (dx * dx + dy * dy <= r2) {
+                    ++counts[i];
+                }
+            }
+        }
+
+        // 按 case 组合两个柱位
+        int case_counts[4];
+        int max_count = 0;
+        for (int c = 0; c < 4; ++c) {
+            case_counts[c] = counts[CASE_PILLARS[c][0]] + counts[CASE_PILLARS[c][1]];
+            if (case_counts[c] > max_count) max_count = case_counts[c];
+        }
+
+        // 归一化到 0~1
+        float norm = static_cast<float>(std::max(max_count, density_min_points_ * 2));
+        for (int c = 0; c < 4; ++c) {
+            scores[c] = static_cast<float>(case_counts[c]) / norm;
+        }
+
+        ROS_INFO_THROTTLE(1.0,
+                          "[Pillar] 密度: A左=%d A右=%d B左=%d B右=%d → "
+                          "case0=%d case1=%d case2=%d case3=%d norm=%.0f",
+                          counts[0], counts[1], counts[2], counts[3], case_counts[0],
+                          case_counts[1], case_counts[2], case_counts[3], norm);
+    }
+
     void dumpProjection(const cv::Mat &proj_img, const PointCloudT &roi_cloud,
                         const PointCloudT &full_cloud, int best_id, float best_score) {
         static int dump_count  = 0;
@@ -237,6 +321,13 @@ class PillarDetect
     int tpl_upscale_       = 2;  // 模板放大倍数
     int img_cols_ = 0, img_rows_ = 0;
     std::vector<cv::Mat> templates_;
+
+    // 密度检测：4 个候选柱位 (odom 系) + 参数
+    PillarPosition pillar_pos_[4];  // [0]=A左 [1]=A右 [2]=B左 [3]=B右
+    bool  density_check_enabled_ = true;
+    float density_check_radius_  = 0.25f;
+    int   density_min_points_    = 5;
+    float density_weight_        = 0.3f;
 };
 
 }  // namespace core
