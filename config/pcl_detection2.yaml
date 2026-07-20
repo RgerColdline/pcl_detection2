@@ -1,8 +1,5 @@
 initial_enable: true
 
-# 点云数据源: "livox"=旧Livox管线(需ICP配准)  "fastlio"=FAST-LIO2订阅
-cloud_source: "fastlio"
-
 debug:
   timing_enable: true
 
@@ -157,6 +154,14 @@ ring_filter:
   z_max: 2.0
 
 # === 柱子检测 ===
+# 【case 命名规则（2026-07 全队统一，与 raicom_vision_laser/config/traverse_map.yaml 一致）】
+#   case0 = (2.7,1.55)+(2.7,2.8) 两柱都在 x=2.7
+#   case1 = (2.7,1.55)+(3.3,2.8)
+#   case2 = (3.3,1.55)+(2.7,2.8)
+#   case3 = (3.3,1.55)+(3.3,2.8) 两柱都在 x=3.3
+# 模板 pillar_case_0X.png 由 tools/make_pillar_templates.py 按此编号生成，
+# 检测输出 /pcl_detection2/pillar_case_id 即此编号，直接当 traverse 的 case 用。
+# 注意：改动下方 pillar_roi/resolution 后必须重跑 make_pillar_templates.py！
 pillar_detect_enabled: true
 
 pillar_roi:
@@ -171,8 +176,10 @@ pillar_roi:
   proj_upscale: 1         # 投影图放大倍数 (大于tpl以给matchTemplate留滑动空间)
   tpl_upscale: 1           # 模板放大倍数
 
+# 4 个候选柱位（odom 系，= 场系绕出生点(0.65,0.75)转180°；仅作记录，
+# 实际匹配位置由模板 PNG 编码，pillar_detect 不读本段）
 pillar_pos:
-  p1_pos1: [-2.05, -0.80]
-  p1_pos2: [-2.65, -0.80]
-  p2_pos1: [-2.05, -2.05]
-  p2_pos2: [-2.65, -2.05]
+  p1_pos1: [-2.05, -0.80]   # A左 = 场系 (2.7,1.55)
+  p1_pos2: [-2.65, -0.80]   # A右 = 场系 (3.3,1.55)
+  p2_pos1: [-2.05, -2.05]   # B左 = 场系 (2.7,2.8)
+  p2_pos2: [-2.65, -2.05]   # B右 = 场系 (3.3,2.8)
