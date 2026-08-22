@@ -1,5 +1,11 @@
 initial_enable: true
 
+# 数据源选择：
+#   fastlio = 订阅 /fastlio_map(FAST-LIO2 累积地图) + /Odometry，camera_init 系与 odom 重合，
+#             不再自建图/ICP（仿真链路，柱子/方环/障碍物管线统一吃 fastlio 地图）
+#   livox   = 订阅 /livox/lidar + mavros 里程计自建图配准（旧链路，保留备用）
+cloud_source: fastlio
+
 debug:
   timing_enable: true
 
@@ -153,17 +159,26 @@ ring_filter:
   z_min: 0.5
   z_max: 2.0
 
-# === 柱子检测 ===
-# 【case 命名规则（2026-07 全队统一，与 raicom_vision_laser/config/traverse_map.yaml 一致）】
-#   case0 = (2.7,1.55)+(2.7,2.8) 两柱都在 x=2.7
-#   case1 = (2.7,1.55)+(3.3,2.8)
-#   case2 = (3.3,1.55)+(2.7,2.8)
-#   case3 = (3.3,1.55)+(3.3,2.8) 两柱都在 x=3.3
-# 模板 pillar_case_0X.png 由 tools/make_pillar_templates.py 按此编号生成，
-# 检测输出 /pcl_detection2/pillar_case_id 即此编号，直接当 traverse 的 case 用。
-# 注意：改动下方 pillar_roi/resolution 后必须重跑 make_pillar_templates.py！
+# === 柱子检测（坐标判定为主，模板匹配兜底，2026-08 重构）===
+# 【case 命名规则（全队统一，与 raicom_vision_laser/config/traverse_map.yaml、
+#   main_control 的 TRAV_CASE_PILLARS 一致，勿单独改）】
+#   候选索引: 0=A左(2.7,1.55) 1=A右(3.3,1.55) 2=B左(2.7,2.8) 3=B右(3.3,2.8)（括号为场系坐标）
+#   case0 = A左+B左（两柱都在 x=2.7）
+#   case1 = A左+B右
+#   case2 = A右+B左
+#   case3 = A右+B右（两柱都在 x=3.3）
+# 检测输出 /pcl_detection2/pillar_case_id 即此编号，直接当穿越 case 用。
 pillar_detect_enabled: true
 
+# ---- 坐标判定（主）：数 4 个候选柱位半径内 ROI 点数，A/B 侧各出 1 根拼 case ----
+pillar_coord:
+  radius: 0.25          # 柱位判定半径 (m)
+  min_points: 5         # 半径内点数 >= 此值判"有柱"（仿真点云干净先取灵敏值，真机再调）
+  confirm_frames: 3     # 连续 N 帧组合一致才发布（防单帧噪声误判）
+  ambiguous_ratio: 0.8  # 同侧两候选都过阈值且点数比 >= 此值 -> 歧义，回退模板匹配
+
+# ---- 模板匹配（兜底）：仅坐标判定歧义时使用 ----
+# 注意：改动下方 pillar_roi/resolution 后必须重跑 tools/make_pillar_templates.py！
 pillar_roi:
   x_min: -3.5
   x_max: -1.2
@@ -172,19 +187,12 @@ pillar_roi:
   z_min: 0.3
   z_max: 1.5
   resolution: 0.05
-  match_threshold: 0.5
+  match_threshold: 0.5    # 兜底判定阈值（合成分 = 模板分×(1+权重×密度分)）
   proj_upscale: 1         # 投影图放大倍数 (大于tpl以给matchTemplate留滑动空间)
-  tpl_upscale: 1           # 模板放大倍数
+  tpl_upscale: 1          # 模板放大倍数
+  density_weight: 0.3     # 兜底合成分中密度分权重 (0~1)
 
-  # 密度检测（点云柱子验证）：统计4个候选柱位半径内的ROI点数，
-  # 按case组合两柱点数归一化得分，与模板匹配分合成最终分
-  density_check_enabled: true
-  density_check_radius: 0.25       # 柱位判定半径 (m)
-  density_min_points: 5            # 该半径内最低点数门槛
-  density_weight: 0.3              # 密度得分权重 (0~1)
-
-# 4 个候选柱位（odom 系，= 场系绕出生点(0.65,0.75)转180°；仅作记录，
-# 实际匹配位置由模板 PNG 编码，pillar_detect 不读本段）
+# 4 个候选柱位（odom 系，= 场系绕出生点(0.65,0.75)转180°；坐标判定与模板共用）
 pillar_pos:
   p1_pos1: [-2.05, -0.80]   # A左 = 场系 (2.7,1.55)
   p1_pos2: [-2.65, -0.80]   # A右 = 场系 (3.3,1.55)

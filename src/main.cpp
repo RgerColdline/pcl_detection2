@@ -658,8 +658,9 @@ class CloudAccumulator
     }
 
     void pillarStartCallback(const std_msgs::Empty::ConstPtr &) {
+        pillar_detect_.reset();  // 清零连续确认状态，重新开始逐帧判定
         pillar_detect_active_ = true;
-        ROS_INFO("[Pillar] 收到启动信号，开始逐帧匹配");
+        ROS_INFO("[Pillar] 收到启动信号，开始逐帧坐标判定（模板兜底）");
     }
 
     // ============================================================
