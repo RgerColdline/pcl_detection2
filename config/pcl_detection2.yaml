@@ -172,8 +172,8 @@ pillar_detect_enabled: true
 
 # ---- 坐标判定（主）：数 4 个候选柱位半径内 ROI 点数，A/B 侧各出 1 根拼 case ----
 pillar_coord:
-  radius: 0.25          # 柱位判定半径 (m)
-  min_points: 5         # 半径内点数 >= 此值判"有柱"（仿真点云干净先取灵敏值，真机再调）
+  radius: 0.3          # 柱位判定半径 (m)
+  min_points: 3          # 半径内点数 >= 此值判"有柱"（仿真点云干净先取灵敏值，真机再调）
   confirm_frames: 3     # 连续 N 帧组合一致才发布（防单帧噪声误判）
   ambiguous_ratio: 0.8  # 同侧两候选都过阈值且点数比 >= 此值 -> 歧义，回退模板匹配
 
@@ -184,7 +184,7 @@ pillar_roi:
   x_max: -1.2
   y_min: -3.15
   y_max: 0.5
-  z_min: 0.3
+  z_min: -1.0
   z_max: 1.5
   resolution: 0.05
   match_threshold: 0.5    # 兜底判定阈值（合成分 = 模板分×(1+权重×密度分)）
