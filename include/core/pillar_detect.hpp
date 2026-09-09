@@ -1,5 +1,24 @@
 #pragma once
 
+// ============================================================
+// 文件: pillar_detect.hpp (pcl_detection2)
+// 日期: 2026-08
+// 功能: 柱子布局检测 -- 坐标判定为主，模板匹配兜底
+//   - 坐标判定(主)：统计 4 个候选柱位(pillar_pos, odom 系)判定半径内
+//     的 ROI 点数，A 侧(柱1)/B 侧(柱2)各出 1 根(同侧取点数高者)，
+//     按 CASE_PILLARS 拼成 case 0~3；连续 confirm_frames 帧组合一致才检出
+//   - 模板匹配(兜底)：同侧两候选都过阈值且点数接近(歧义)时，
+//     用 templates/pillar_case_00~03.png 模板匹配裁定整局 case
+//   - 输入：main.cpp 收到 /pcl_detection2/start_pillar_detect 后逐帧喂入
+//     (cloud_source=fastlio 时为 /fastlio_map 降采样点云，camera_init 与 odom 重合)
+//   - 输出：detect() 返回 detected=true 时 main.cpp 发布
+//     /pcl_detection2/pillar_case_id (Int32) 并自动停止匹配
+// case 命名规则（与 raicom_vision_laser/config/traverse_map.yaml、main_control
+// 的 TRAV_CASE_PILLARS 一致，全队统一勿单独改）：
+//   候选索引: 0=A左 1=A右 2=B左 3=B右（场系坐标见 config/pcl_detection2.yaml）
+//   case0 = A左+B左   case1 = A左+B右   case2 = A右+B左   case3 = A右+B右
+// ============================================================
+
 #include "core/template_match/template_loader.h"
 
 #include <pcl/filters/crop_box.h>
@@ -14,8 +33,6 @@
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 
-#include <Eigen/Dense>
-
 #include <algorithm>
 #include <cmath>
 #include <sstream>
@@ -27,22 +44,6 @@ namespace pcl_detection2
 namespace core
 {
 
-/**
- * @brief 柱子位置组合检测（模板匹配 + 坐标验证）
- *
- * 将ROI点云投影到Z平面为二值图，与4个预生成模板匹配后，
- * 再用实际点云在柱子固定位置上的分布做坐标验证，排除模板匹配的误检。
- *
- * 柱子只有4个可能位置（来自 pillar_nav.yaml）：
- *   p1_pos1(-2.05,-0.80)  p1_pos2(-2.65,-0.80)
- *   p2_pos1(-2.05,-2.05)  p2_pos2(-2.65,-2.05)
- *
- * 每种case对应哪些位置有柱子：
- *   case_00: p1_pos1
- *   case_01: p1_pos2 + p2_pos2
- *   case_02: p1_pos1 + p2_pos2
- *   case_03: p1_pos2 + p2_pos1
- */
 class PillarDetect
 {
   public:
@@ -53,111 +54,262 @@ class PillarDetect
 
     struct Result
     {
-        int case_id   = -1;
-        float score   = 0.0f;
-        bool detected = false;
+        int case_id      = -1;    // 0~3，-1=未检出
+        float score      = 0.0f;  // 坐标判定=两柱点数均值；模板兜底=合成分
+        bool detected    = false;
+        bool by_template = false; // true=本局由模板兜底裁定
+    };
+
+    struct PillarPosition
+    {
+        float x = 0.0f;
+        float y = 0.0f;
+    };
+
+    // case 描述（日志用），与 CASE_PILLARS 顺序一致
+    static constexpr const char* CASE_DESC[4] = {
+        "A左+B左（两柱都在 x=2.7）",
+        "A左+B右（(2.7,1.55)+(3.3,2.8)）",
+        "A右+B左（(3.3,1.55)+(2.7,2.8)）",
+        "A右+B右（两柱都在 x=3.3）"
     };
 
     PillarDetect() = default;
 
+    // ==================== 初始化（读 yaml 参数 + 加载兜底模板） ====================
     void init(ros::NodeHandle &pnh) {
-        // ROI参数
-        pnh.param("pillar_roi/x_min", roi_x_min_, -1.8f);
-        pnh.param("pillar_roi/x_max", roi_x_max_, -1.7f);
-        pnh.param("pillar_roi/y_min", roi_y_min_, -0.1f);
-        pnh.param("pillar_roi/y_max", roi_y_max_, 0.0f);
+        // ROI 参数（z 带裁剪，坐标判定与模板兜底共用）
+        pnh.param("pillar_roi/x_min", roi_x_min_, -3.5f);
+        pnh.param("pillar_roi/x_max", roi_x_max_, -1.2f);
+        pnh.param("pillar_roi/y_min", roi_y_min_, -3.15f);
+        pnh.param("pillar_roi/y_max", roi_y_max_, 0.5f);
         pnh.param("pillar_roi/z_min", roi_z_min_, 0.3f);
         pnh.param("pillar_roi/z_max", roi_z_max_, 1.5f);
         pnh.param("pillar_roi/resolution", resolution_, 0.05f);
-        pnh.param("pillar_roi/match_threshold", match_threshold_, 0.3f);
-        pnh.param("pillar_roi/proj_upscale", proj_upscale_, 3);
-        pnh.param("pillar_roi/tpl_upscale", tpl_upscale_, 2);
+        pnh.param("pillar_roi/match_threshold", match_threshold_, 0.5f);
+        pnh.param("pillar_roi/proj_upscale", proj_upscale_, 1);
+        pnh.param("pillar_roi/tpl_upscale", tpl_upscale_, 1);
+        pnh.param("pillar_roi/density_weight", density_weight_, 0.3f);
 
-        // 加载4个柱子坐标（世界坐标，与 pillar_nav.yaml 一致）
-        auto load_pos = [&](const std::string &key, Eigen::Vector2f &pos) {
-            std::vector<double> val;
-            pnh.getParam("pillar_pos/" + key, val);
-            if (val.size() >= 2) {
-                pos.x() = static_cast<float>(val[0]);
-                pos.y() = static_cast<float>(val[1]);
-            }
-        };
-        load_pos("p1_pos1", pillar_world_[0]);
-        load_pos("p1_pos2", pillar_world_[1]);
-        load_pos("p2_pos1", pillar_world_[2]);
-        load_pos("p2_pos2", pillar_world_[3]);
+        // 坐标判定参数（主判定）
+        pnh.param("pillar_coord/radius", coord_radius_, 0.25f);
+        pnh.param("pillar_coord/min_points", coord_min_points_, 5);
+        pnh.param("pillar_coord/confirm_frames", confirm_frames_, 3);
+        pnh.param("pillar_coord/ambiguous_ratio", ambiguous_ratio_, 0.8f);
 
-        // 计算投影图尺寸
+        // 计算投影图尺寸（+0.5f 防浮点截断，如 2.3/0.05=45.999->46）
         img_cols_ = std::max(1, static_cast<int>((roi_x_max_ - roi_x_min_) / resolution_ + 0.5f));
         img_rows_ = std::max(1, static_cast<int>((roi_y_max_ - roi_y_min_) / resolution_ + 0.5f));
 
-        // 从文件加载4个模板
-        TemplateLoader loader("pcl_detection2");
-        std::vector<std::string> tpl_paths = {"pillar_case_00.png", "pillar_case_01.png",
-                                              "pillar_case_02.png", "pillar_case_03.png"};
-        templates_                         = loader.load(tpl_paths);
+        // 4 个候选柱位（odom 系）
+        auto loadPillarPos = [&](const std::string &key, PillarPosition &pos) {
+            std::vector<double> v;
+            if (pnh.getParam("pillar_pos/" + key, v) && v.size() >= 2) {
+                pos.x = static_cast<float>(v[0]);
+                pos.y = static_cast<float>(v[1]);
+            }
+        };
+        loadPillarPos("p1_pos1", pillar_pos_[0]);  // A左
+        loadPillarPos("p1_pos2", pillar_pos_[1]);  // A右
+        loadPillarPos("p2_pos1", pillar_pos_[2]);  // B左
+        loadPillarPos("p2_pos2", pillar_pos_[3]);  // B右
 
-        ROS_INFO("[PillarDetect] 初始化完成: ROI=%.1f~%.1f x %.1f~%.1f, 图=%dx%d, 模板=%zu",
-                 roi_x_min_, roi_x_max_, roi_y_min_, roi_y_max_, img_cols_, img_rows_,
+        // 兜底模板（加载失败仅告警不致命：坐标判定正常时用不到）
+        TemplateLoader loader("pcl_detection2");
+        templates_ = loader.load({"pillar_case_00.png", "pillar_case_01.png",
+                                  "pillar_case_02.png", "pillar_case_03.png"});
+
+        ROS_INFO("[PillarDetect] 初始化: 坐标判定 radius=%.2fm min_points=%d confirm=%d帧 "
+                 "歧义比=%.2f | ROI x[%.1f,%.1f] y[%.1f,%.1f] z[%.1f,%.1f] | 兜底模板=%zu",
+                 coord_radius_, coord_min_points_, confirm_frames_, ambiguous_ratio_,
+                 roi_x_min_, roi_x_max_, roi_y_min_, roi_y_max_, roi_z_min_, roi_z_max_,
                  templates_.size());
-        ROS_INFO("[PillarDetect] 柱子坐标验证: p1_pos1(%.2f,%.2f) p1_pos2(%.2f,%.2f) "
-                 "p2_pos1(%.2f,%.2f) p2_pos2(%.2f,%.2f)",
-                 pillar_world_[0].x(), pillar_world_[0].y(), pillar_world_[1].x(),
-                 pillar_world_[1].y(), pillar_world_[2].x(), pillar_world_[2].y(),
-                 pillar_world_[3].x(), pillar_world_[3].y());
     }
 
+    // 重新触发检测时清空连续确认状态（main.cpp 的 start 回调里调用）
+    void reset() {
+        last_case_   = -1;
+        case_streak_ = 0;
+    }
+
+    // ==================== 逐帧检测 ====================
     Result detect(const ConstPtr &cloud) {
         Result result;
         if (!cloud || cloud->empty()) {
             ROS_WARN_THROTTLE(5.0, "[Pillar] 输入点云为空，无法检测");
             return result;
         }
-        if (templates_.empty()) {
-            ROS_WARN_THROTTLE(5.0, "[Pillar] 模板未加载，无法检测");
-            return result;
-        }
 
-        // Step 1: ROI裁剪
-        pcl::CropBox<PointT> crop;
-        crop.setMin(Eigen::Vector4f(roi_x_min_, roi_y_min_, roi_z_min_, 1.0f));
-        crop.setMax(Eigen::Vector4f(roi_x_max_, roi_y_max_, roi_z_max_, 1.0f));
-        crop.setInputCloud(cloud);
+        // ---- Step 1: ROI 裁剪（z 带内，覆盖 4 个候选柱位）----
         Ptr roi_cloud(new PointCloudT);
-        crop.filter(*roi_cloud);
+        {
+            pcl::CropBox<PointT> crop;
+            crop.setMin(Eigen::Vector4f(roi_x_min_, roi_y_min_, roi_z_min_, 1.0f));
+            crop.setMax(Eigen::Vector4f(roi_x_max_, roi_y_max_, roi_z_max_, 1.0f));
+            crop.setInputCloud(cloud);
+            crop.filter(*roi_cloud);
+        }
         if (roi_cloud->empty()) {
-            ROS_WARN_THROTTLE(5.0, "[Pillar] ROI裁剪后无点，无法检测");
+            ROS_WARN_THROTTLE(5.0, "[Pillar] ROI 裁剪后无点（地图未覆盖柱区或坐标系不符）");
             return result;
         }
 
-        // Step 2: Z平面投影
-        cv::Mat proj_img = cv::Mat::zeros(img_rows_, img_cols_, CV_8UC1);
-        float inv_res    = 1.0f / resolution_;
-        for (const auto &pt : roi_cloud->points) {
-            int col = static_cast<int>((pt.x - roi_x_min_) * inv_res);
-            int row = static_cast<int>((pt.y - roi_y_min_) * inv_res);
-            if (col >= 0 && col < img_cols_ && row >= 0 && row < img_rows_) {
-                proj_img.at<uint8_t>(row, col) = 255;
-            }
-        }
+        // ---- Step 2: 统计 4 个候选柱位半径内点数 ----
+        int counts[4] = {0, 0, 0, 0};
+        countNearPillars(*roi_cloud, counts);
 
-        // Step 3: 形态学膨胀
-        cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
+        // ---- Step 3: Z 平面投影二值图（模板兜底 + dump 用）----
+        cv::Mat proj_img = projectToImage(*roi_cloud);
+        cv::Mat kernel   = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
         cv::dilate(proj_img, proj_img, kernel);
 
-        // Step 4: 放大投影图和模板 → matchTemplate有滑动空间
+        // ---- Step 4: 坐标判定，A/B 侧各出 1 根 ----
+        int a_idx = -1, b_idx = -1;
+        bool ambiguous = false;
+        int frame_case = decideByCoord(counts, a_idx, b_idx, ambiguous);
+
+        // ---- Step 5: 坐标歧义 -> 模板兜底裁定 ----
+        float tpl_score  = 0.0f;
+        bool by_template = false;
+        if (ambiguous) {
+            frame_case  = decideByTemplate(proj_img, counts, tpl_score);
+            by_template = (frame_case >= 0);
+        }
+
+        // ---- Step 6: 连续 confirm_frames 帧组合一致才检出（防单帧噪声）----
+        if (frame_case >= 0) {
+            if (frame_case == last_case_) {
+                ++case_streak_;
+            }
+            else {
+                last_case_   = frame_case;
+                case_streak_ = 1;
+            }
+
+            if (case_streak_ >= confirm_frames_) {
+                result.case_id     = frame_case;
+                result.detected    = true;
+                result.by_template = by_template;
+                result.score       = by_template
+                                         ? tpl_score
+                                         : 0.5f * (counts[a_idx] + counts[b_idx]);
+            }
+        }
+        else {
+            case_streak_ = 0;
+        }
+
+        ROS_INFO_THROTTLE(1.0,
+                          "[Pillar] ROI点=%zu A左=%d A右=%d B左=%d B右=%d (阈值%d) "
+                          "本帧case=%d 连续%d/%d%s",
+                          roi_cloud->size(), counts[0], counts[1], counts[2], counts[3],
+                          coord_min_points_, frame_case, case_streak_, confirm_frames_,
+                          by_template ? " [模板兜底]" : "");
+
+        if (result.detected) {
+            ROS_INFO("[Pillar] ★ 检测成功 case=%d（%s）A左=%d A右=%d B左=%d B右=%d "
+                     "连续%d帧 %s score=%.1f",
+                     result.case_id, CASE_DESC[result.case_id], counts[0], counts[1],
+                     counts[2], counts[3], case_streak_,
+                     result.by_template ? "模板兜底" : "坐标判定", result.score);
+        }
+
+        // ---- dump 投影图/点云到 temp（前 3 个窗口，调参用）----
+        dumpProjection(proj_img, *roi_cloud, *cloud, frame_case, counts);
+
+        return result;
+    }
+
+  private:
+    // ==================== 统计候选柱位半径内点数 ====================
+    // pillar_pos_ 映射: [0]=A左 [1]=A右 [2]=B左 [3]=B右（XY 平面距离，z 已在 ROI 带内）
+    void countNearPillars(const PointCloudT &roi_cloud, int counts[4]) const {
+        const float r2 = coord_radius_ * coord_radius_;
+        for (const auto &pt : roi_cloud.points) {
+            for (int i = 0; i < 4; ++i) {
+                const float dx = pt.x - pillar_pos_[i].x;
+                const float dy = pt.y - pillar_pos_[i].y;
+                if (dx * dx + dy * dy <= r2) {
+                    ++counts[i];
+                }
+            }
+        }
+    }
+
+    // ==================== 坐标判定：A/B 侧各出 1 根拼 case ====================
+    // 返回 case 0~3；-1 = 本帧无结论（某侧两候选都不过阈值：柱区未扫够，继续等）
+    // ambiguous=true 表示同侧两候选点数接近分不清，外层走模板兜底
+    int decideByCoord(const int counts[4], int &a_idx, int &b_idx, bool &ambiguous) const {
+        // 四候选位点数都过阈值：A侧/B侧各自严格取点数最多的一根拼 case，
+        // 不因点数接近而走模板兜底（用户要求：各侧各取一根，取多者）。
+        if (counts[0] >= coord_min_points_ && counts[1] >= coord_min_points_ &&
+            counts[2] >= coord_min_points_ && counts[3] >= coord_min_points_) {
+            a_idx     = (counts[0] >= counts[1]) ? 0 : 1;
+            b_idx     = (counts[2] >= counts[3]) ? 2 : 3;
+            ambiguous = false;
+            // (A候选, B候选) -> case：case0=(0,2) case1=(0,3) case2=(1,2) case3=(1,3)
+            return a_idx * 2 + (b_idx - 2);
+        }
+        a_idx = pickSide(0, 1, counts, ambiguous);
+        b_idx = pickSide(2, 3, counts, ambiguous);
+        if (a_idx < 0 || b_idx < 0) return -1;
+        // (A候选, B候选) -> case：case0=(0,2) case1=(0,3) case2=(1,2) case3=(1,3)
+        return a_idx * 2 + (b_idx - 2);
+    }
+
+    // 单侧挑选：返回选中的候选索引
+    //   >=0 = 该侧唯一过阈值者，或两候选都过阈值但点数差距明显取高者
+    //   -1  = 该侧两候选都不过阈值（继续等）
+    //   -2  = 两候选都过阈值且点数接近（歧义，置 ambiguous）
+    int pickSide(int i, int j, const int counts[4], bool &ambiguous) const {
+        const bool pi = counts[i] >= coord_min_points_;
+        const bool pj = counts[j] >= coord_min_points_;
+        if (pi && pj) {
+            const int lo = std::min(counts[i], counts[j]);
+            const int hi = std::max(counts[i], counts[j]);
+            if (hi > 0 && static_cast<float>(lo) >= ambiguous_ratio_ * hi) {
+                ambiguous = true;
+                return -2;
+            }
+            return counts[i] >= counts[j] ? i : j;
+        }
+        if (pi) return i;
+        if (pj) return j;
+        return -1;
+    }
+
+    // ==================== Z 平面投影二值图（模板兜底/dump 用） ====================
+    cv::Mat projectToImage(const PointCloudT &roi_cloud) const {
+        cv::Mat img    = cv::Mat::zeros(img_rows_, img_cols_, CV_8UC1);
+        const float inv_res = 1.0f / resolution_;
+        for (const auto &pt : roi_cloud.points) {
+            const int col = static_cast<int>((pt.x - roi_x_min_) * inv_res);
+            const int row = static_cast<int>((pt.y - roi_y_min_) * inv_res);
+            if (col >= 0 && col < img_cols_ && row >= 0 && row < img_rows_) {
+                img.at<uint8_t>(row, col) = 255;
+            }
+        }
+        return img;
+    }
+
+    // ==================== 模板兜底裁定（仅坐标歧义时调用） ====================
+    // 合成分 = 模板分 × (1 + density_weight × 密度分)，需 > match_threshold
+    // 密度分复用坐标判定的 counts（case 两柱位点数之和归一化）
+    // 返回 case 0~3，无置信结果返回 -1
+    int decideByTemplate(const cv::Mat &proj_img, const int counts[4], float &score) const {
+        if (templates_.empty()) {
+            ROS_WARN_THROTTLE(5.0, "[Pillar] 坐标判定歧义且模板未加载，本帧放弃");
+            return -1;
+        }
+
+        // 投影图/模板放大后二值化
         cv::Mat proj_scaled;
         cv::resize(proj_img, proj_scaled, cv::Size(), proj_upscale_, proj_upscale_,
                    cv::INTER_NEAREST);
         cv::threshold(proj_scaled, proj_scaled, 127, 255, cv::THRESH_BINARY);
 
-        // Step 5: 模板匹配，按得分降序排列候选
-        struct Candidate {
-            int id;
-            float score;
-        };
-        std::vector<Candidate> candidates;
-        for (size_t t = 0; t < templates_.size(); ++t) {
+        float match_scores[4] = {0, 0, 0, 0};
+        for (size_t t = 0; t < templates_.size() && t < 4; ++t) {
             cv::Mat tpl_scaled;
             cv::resize(templates_[t], tpl_scaled, cv::Size(), tpl_upscale_, tpl_upscale_,
                        cv::INTER_NEAREST);
@@ -165,122 +317,44 @@ class PillarDetect
 
             cv::Mat match_res;
             cv::matchTemplate(proj_scaled, tpl_scaled, match_res, cv::TM_CCOEFF_NORMED);
-
             double max_val;
             cv::minMaxLoc(match_res, nullptr, &max_val);
-            float score = static_cast<float>(max_val);
-            if (score >= match_threshold_) {
-                candidates.push_back({static_cast<int>(t), score});
-            }
+            match_scores[t] = static_cast<float>(max_val);
         }
-        // 按得分降序排列
-        std::sort(candidates.begin(), candidates.end(),
-                  [](const Candidate &a, const Candidate &b) { return a.score > b.score; });
 
-        std::string score_detail;
-        for (const auto &c : candidates) {
-            char buf[32];
-            snprintf(buf, sizeof(buf), " t%d=%.3f", c.id, c.score);
-            score_detail += buf;
+        // 密度分：case->柱位 case0={0,2} case1={0,3} case2={1,2} case3={1,3}
+        static const int CASE_PILLARS[4][2] = {{0, 2}, {0, 3}, {1, 2}, {1, 3}};
+        int case_counts[4];
+        int max_count = 0;
+        for (int c = 0; c < 4; ++c) {
+            case_counts[c] = counts[CASE_PILLARS[c][0]] + counts[CASE_PILLARS[c][1]];
+            max_count      = std::max(max_count, case_counts[c]);
+        }
+        const float norm = static_cast<float>(std::max(max_count, 1));
+
+        int best_id    = -1;
+        float best     = match_threshold_;
+        for (int t = 0; t < 4; ++t) {
+            const float final_score =
+                match_scores[t] * (1.0f + density_weight_ * case_counts[t] / norm);
+            if (final_score > best) {
+                best     = final_score;
+                best_id  = t;
+            }
         }
 
         ROS_INFO_THROTTLE(1.0,
-                          "[Pillar] ROI点=%zu 白点=%d/%d 原图=%dx%d 阈值=%.2f 候选:%s",
-                          roi_cloud->size(), cv::countNonZero(proj_img), img_rows_ * img_cols_,
-                          img_cols_, img_rows_, match_threshold_, score_detail.c_str());
+                          "[Pillar] 模板兜底: t0=%.3f t1=%.3f t2=%.3f t3=%.3f -> case=%d (%.3f)",
+                          match_scores[0], match_scores[1], match_scores[2], match_scores[3],
+                          best_id, best);
 
-        // Step 6: 坐标验证——对每个候选，按实际点云分布确认
-        int accepted_id = -1;
-        float accepted_score = 0.0f;
-        for (const auto &c : candidates) {
-            float mismatches = verifyByCoordinates(proj_img, c.id);
-            if (mismatches <= kMaxMismatchAccept_) {
-                accepted_id    = c.id;
-                accepted_score = c.score;
-                if (mismatches > 0.0f) {
-                    ROS_WARN("[Pillar] case=%d score=%.3f 坐标偏差=%.1f，仍接受",
-                             c.id, c.score, mismatches);
-                } else {
-                    ROS_INFO("[Pillar] case=%d score=%.3f 坐标完全吻合", c.id, c.score);
-                }
-                break;
-            } else {
-                ROS_WARN("[Pillar] case=%d score=%.3f 坐标偏差=%.1f，跳过",
-                         c.id, c.score, mismatches);
-            }
-        }
-
-        if (accepted_id >= 0) {
-            result.case_id  = accepted_id;
-            result.score    = accepted_score;
-            result.detected = true;
-            ROS_INFO("[Pillar] ★ 检测成功 case=%d score=%.3f", accepted_id, accepted_score);
-        }
-
-        // ---- dump投影图、ROI点云、全量地图点云到temp ----
-        dumpProjection(proj_img, *roi_cloud, *cloud, accepted_id, accepted_score);
-
-        return result;
+        if (best_id >= 0) score = best;
+        return best_id;
     }
 
-  private:
-    // 每个位置应该有空还是有柱子: [case_id][pos_idx] = true=有柱子
-    // pos_idx: 0=p1_pos1 1=p1_pos2 2=p2_pos1 3=p2_pos2
-    static constexpr bool kPillarPattern_[4][4] = {
-        {true, false, false, false},  // case_00: p1_pos1 only
-        {false, true, false, true},   // case_01: p1_pos2 + p2_pos2
-        {true, false, false, true},   // case_02: p1_pos1 + p2_pos2
-        {false, true, true, false},   // case_03: p1_pos2 + p2_pos1
-    };
-    static constexpr float kMaxMismatchAccept_ = 1.0f;  // 最大可接受偏差分
-
-    /**
-     * @brief 坐标验证：检查投影图上每个柱子位置的白像素数是否符合预期
-     * @return 偏差总分（0=完美，>0 有偏差）
-     */
-    float verifyByCoordinates(const cv::Mat &proj_img, int case_id) const {
-        if (case_id < 0 || case_id >= 4) return 999.0f;
-
-        float inv_res = 1.0f / resolution_;
-        float mismatches = 0.0f;
-        std::string detail;
-
-        for (int i = 0; i < 4; ++i) {
-            // 世界坐标 → 像素坐标
-            int col = static_cast<int>((pillar_world_[i].x() - roi_x_min_) * inv_res);
-            int row = static_cast<int>((pillar_world_[i].y() - roi_y_min_) * inv_res);
-            if (col < 0 || col >= img_cols_ || row < 0 || row >= img_rows_) continue;
-
-            // 统计半径2内的白像素数
-            int white_count = 0;
-            int r_min = std::max(0, row - 2), r_max = std::min(img_rows_ - 1, row + 2);
-            int c_min = std::max(0, col - 2), c_max = std::min(img_cols_ - 1, col + 2);
-            for (int r = r_min; r <= r_max; ++r) {
-                for (int c = c_min; c <= c_max; ++c) {
-                    if (proj_img.at<uint8_t>(r, c) == 255) ++white_count;
-                }
-            }
-
-            bool expect_pillar = kPillarPattern_[case_id][i];
-            char buf[64];
-            if (expect_pillar && white_count < 2) {
-                mismatches += 1.0f;
-                snprintf(buf, sizeof(buf), " pos%d=%d(expected>1)", i, white_count);
-            } else if (!expect_pillar && white_count > 4) {
-                mismatches += 0.5f;
-                snprintf(buf, sizeof(buf), " pos%d=%d(expected<=4)", i, white_count);
-            } else {
-                snprintf(buf, sizeof(buf), " pos%d=%d(ok)", i, white_count);
-            }
-            detail += buf;
-        }
-
-        ROS_INFO("[Pillar] 验证 case=%d mismatch=%.1f:%s", case_id, mismatches, detail.c_str());
-        return mismatches;
-    }
-
+    // ==================== dump 投影图/点云（前 3 个窗口，调参用） ====================
     void dumpProjection(const cv::Mat &proj_img, const PointCloudT &roi_cloud,
-                        const PointCloudT &full_cloud, int best_id, float best_score) {
+                        const PointCloudT &full_cloud, int frame_case, const int counts[4]) {
         static int dump_count  = 0;
         static int frame_count = 0;
         static std::string save_dir;
@@ -288,6 +362,7 @@ class PillarDetect
         if (dump_count >= 3) return;
 
         ++frame_count;
+        // 每5帧保存一次，共3次
         if (frame_count < 3 || (frame_count % 5) != 0) return;
 
         if (save_dir.empty()) {
@@ -295,28 +370,27 @@ class PillarDetect
             mkdir(save_dir.c_str(), 0755);
         }
 
+        // 转BGR，画判定结果覆盖
         cv::Mat vis;
         cv::cvtColor(proj_img, vis, cv::COLOR_GRAY2BGR);
 
-        if (best_id >= 0 && best_id < static_cast<int>(templates_.size())) {
-            for (int r = 0; r < vis.rows; ++r) {
-                for (int c = 0; c < vis.cols; ++c) {
-                    if (templates_[best_id].at<uint8_t>(r, c) == 255) {
-                        if (proj_img.at<uint8_t>(r, c) == 255) {
-                            vis.at<cv::Vec3b>(r, c) = cv::Vec3b(0, 255, 0);
-                        } else {
-                            vis.at<cv::Vec3b>(r, c) = cv::Vec3b(255, 0, 0);
-                        }
-                    }
-                }
-            }
+        // 在 4 个候选柱位画判定圈：有点=红圈，无点=蓝圈
+        const float inv_res = 1.0f / resolution_;
+        for (int i = 0; i < 4; ++i) {
+            const int col = static_cast<int>((pillar_pos_[i].x - roi_x_min_) * inv_res);
+            const int row = static_cast<int>((pillar_pos_[i].y - roi_y_min_) * inv_res);
+            const cv::Scalar color =
+                (counts[i] >= coord_min_points_) ? cv::Scalar(0, 0, 255) : cv::Scalar(255, 0, 0);
+            cv::circle(vis, cv::Point(col, row),
+                       static_cast<int>(coord_radius_ * inv_res), color, 1);
         }
 
         std::ostringstream fname;
         fname << save_dir << "/pillar_dump_" << dump_count << "_f" << frame_count << "_case"
-              << best_id << "_s" << int(best_score * 100) << ".png";
+              << frame_case << ".png";
         cv::imwrite(fname.str(), vis);
 
+        // 同步保存ROI点云和全量地图点云为PCD
         std::ostringstream pcd_fname;
         pcd_fname << save_dir << "/pillar_dump_" << dump_count << "_f" << frame_count << ".pcd";
         pcl::io::savePCDFileBinary(pcd_fname.str(), roi_cloud);
@@ -324,27 +398,35 @@ class PillarDetect
         full_fname << save_dir << "/pillar_dump_" << dump_count << "_f" << frame_count
                    << "_full.pcd";
         pcl::io::savePCDFileBinary(full_fname.str(), full_cloud);
-        ROS_INFO("[Pillar] dump #%d: %s + pcd", dump_count + 1, fname.str().c_str());
+        ROS_INFO("[Pillar] dump #%d: %s + %s (%zu pts) + %s (%zu pts)", dump_count + 1,
+                 fname.str().c_str(), pcd_fname.str().c_str(), roi_cloud.size(),
+                 full_fname.str().c_str(), full_cloud.size());
         ++dump_count;
     }
 
-    float roi_x_min_ = -3.0f, roi_x_max_ = -1.7f;
-    float roi_y_min_ = -2.65f, roi_y_max_ = 0.0f;
+    // ---- 参数（config/pcl_detection2.yaml）----
+    float roi_x_min_ = -3.5f, roi_x_max_ = -1.2f;
+    float roi_y_min_ = -3.15f, roi_y_max_ = 0.5f;
     float roi_z_min_ = 0.3f, roi_z_max_ = 1.5f;
-    float resolution_      = 0.05f;
-    float match_threshold_ = 0.3f;
-    int proj_upscale_      = 3;
-    int tpl_upscale_       = 2;
-    int img_cols_ = 0, img_rows_ = 0;
-    std::vector<cv::Mat> templates_;
+    float resolution_      = 0.05f;  // 投影分辨率 m/px
+    float match_threshold_ = 0.5f;   // 模板兜底合成分阈值
+    int proj_upscale_      = 1;      // 投影图放大倍数（>tpl 给匹配留滑动空间）
+    int tpl_upscale_       = 1;      // 模板放大倍数
+    float density_weight_  = 0.3f;   // 兜底合成分中密度分权重
 
-    // 4个柱子位置的世界坐标（从YAML pillar_pos/ 加载）
-    Eigen::Vector2f pillar_world_[4] = {
-        Eigen::Vector2f(-2.05f, -0.80f),
-        Eigen::Vector2f(-2.65f, -0.80f),
-        Eigen::Vector2f(-2.05f, -2.05f),
-        Eigen::Vector2f(-2.65f, -2.05f),
-    };
+    float coord_radius_    = 0.25f;  // 柱位判定半径 (m)
+    int coord_min_points_  = 5;      // 半径内点数 >= 此值判"有柱"
+    int confirm_frames_    = 3;      // 连续一致帧数
+    float ambiguous_ratio_ = 0.8f;   // 同侧点数比 >= 此值 -> 歧义走模板
+
+    int img_cols_ = 0, img_rows_ = 0;  // 投影图尺寸（init 由 ROI/resolution 算出）
+    std::vector<cv::Mat> templates_;   // 兜底模板 pillar_case_00~03.png
+
+    PillarPosition pillar_pos_[4];     // [0]=A左 [1]=A右 [2]=B左 [3]=B右（odom 系）
+
+    // ---- 连续确认状态 ----
+    int last_case_   = -1;             // 上一帧判定 case
+    int case_streak_ = 0;              // 连续一致帧数
 };
 
 }  // namespace core

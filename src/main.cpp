@@ -6,6 +6,7 @@
 #include "core/voxel.hpp"
 #include "pipeline/extract_square_ring.hpp"
 
+#include <nav_msgs/Odometry.h>
 #include <pcl/common/transforms.h>
 #include <pcl/filters/crop_box.h>
 #include <pcl/filters/project_inliers.h>
@@ -18,7 +19,6 @@
 #include <sensor_msgs/PointCloud2.h>
 #include <std_msgs/Empty.h>
 #include <std_msgs/Int32.h>
-#include <nav_msgs/Odometry.h>
 
 #include <cmath>
 #include <deque>
@@ -108,7 +108,8 @@ class CloudAccumulator
             fastlio_odom_sub_ =
                 nh_.subscribe("/Odometry", 1, &CloudAccumulator::fastlioOdomCallback, this);
             ROS_INFO("[数据源] FAST-LIO2 (/fastlio_map + /Odometry)");
-        } else {
+        }
+        else {
             cloud_sub_ = nh_.subscribe("/livox/lidar", 1, &CloudAccumulator::cloudCallback, this);
             ROS_INFO("[数据源] Livox 原始 (/livox/lidar)");
         }
@@ -177,6 +178,15 @@ class CloudAccumulator
         pnh_.param("roi/z_min", roi_z_min_, 0.3f);
         pnh_.param("roi/z_max", roi_z_max_, 2.0f);
 
+        // FAST-LIO 管线专用 ROI（cloud_source == "fastlio" 时使用）
+        // 独立于上方 roi:（livox 管线用），未设置时回退到 roi/ 对应值
+        pnh_.param("roi_fastlio/x_min", fastlio_roi_x_min_, roi_x_min_);
+        pnh_.param("roi_fastlio/x_max", fastlio_roi_x_max_, roi_x_max_);
+        pnh_.param("roi_fastlio/y_min", fastlio_roi_y_min_, roi_y_min_);
+        pnh_.param("roi_fastlio/y_max", fastlio_roi_y_max_, roi_y_max_);
+        pnh_.param("roi_fastlio/z_min", fastlio_roi_z_min_, roi_z_min_);
+        pnh_.param("roi_fastlio/z_max", fastlio_roi_z_max_, roi_z_max_);
+
         // 配准前ROI: 在ICP之前先ROI过滤，减少背景点对配准的干扰
         // 边界独立于方环检测ROI，未设置时回退到 roi/ 对应值
         pnh_.param("pre_register_roi/enabled", pre_register_roi_enabled_, true);
@@ -199,6 +209,9 @@ class CloudAccumulator
         crop_box_ = std::make_unique<pcl_detection2::core::CropBoxRoi<PointT>>(
             livox_roi_uav_radius_, roi_x_min_, roi_x_max_, roi_y_min_, roi_y_max_, roi_z_min_,
             roi_z_max_);
+        crop_box_fastlio_ = std::make_unique<pcl_detection2::core::CropBoxRoi<PointT>>(
+            livox_roi_uav_radius_, fastlio_roi_x_min_, fastlio_roi_x_max_, fastlio_roi_y_min_,
+            fastlio_roi_y_max_, fastlio_roi_z_min_, fastlio_roi_z_max_);
         pre_register_crop_box_ = std::make_unique<pcl_detection2::core::CropBoxRoi<PointT>>(
             livox_roi_uav_radius_, pre_roi_x_min_, pre_roi_x_max_, pre_roi_y_min_, pre_roi_y_max_,
             pre_roi_z_min_, pre_roi_z_max_);
@@ -658,8 +671,9 @@ class CloudAccumulator
     }
 
     void pillarStartCallback(const std_msgs::Empty::ConstPtr &) {
+        pillar_detect_.reset();  // 清零连续确认状态，重新开始逐帧判定
         pillar_detect_active_ = true;
-        ROS_INFO("[Pillar] 收到启动信号，开始逐帧匹配");
+        ROS_INFO("[Pillar] 收到启动信号，开始逐帧坐标判定（模板兜底）");
     }
 
     // ============================================================
@@ -674,7 +688,7 @@ class CloudAccumulator
         last_fastlio_pose_(0, 3) = msg->pose.pose.position.x;
         last_fastlio_pose_(1, 3) = msg->pose.pose.position.y;
         last_fastlio_pose_(2, 3) = msg->pose.pose.position.z;
-        fastlio_odom_received_ = true;
+        fastlio_odom_received_   = true;
     }
 
     void cloudRegisteredCallback(const sensor_msgs::PointCloud2::ConstPtr &msg) {
@@ -687,38 +701,38 @@ class CloudAccumulator
 
         // 2. FAST-LIO2 的 /fastlio_map 在 camera_init 系（与 PX4 local 重合）
         //    直接体素降采样，无需坐标系变换
-        voxel_filter_->filterCloud(raw_cloud, downsampled_livox_cloud_,
-                                   VoxelFilterT::Mode::AVERAGE);
-        if (downsampled_livox_cloud_->empty()) return;
+        // voxel_filter_->filterCloud(raw_cloud, downsampled_livox_cloud_,
+        //                            VoxelFilterT::Mode::AVERAGE);
+        // if (downsampled_livox_cloud_->empty()) return;
 
         // 4. 直接处理当前帧（FAST-LIO2已做累积，不再自己建图）
         // ── 障碍物处理 ──
         roi_filtered_cloud_->clear();
-        eroded_cloud_->clear();
-        if (dilation_radius_ > 0) { dilated_cloud_->clear(); }
+        // eroded_cloud_->clear();
+        // if (dilation_radius_ > 0) { dilated_cloud_->clear(); }
         projected_cloud_->clear();
 
-        crop_box_->filterROI(downsampled_livox_cloud_, roi_filtered_cloud_);
-        erodePointCloud(roi_filtered_cloud_, eroded_cloud_);
-        dilatePointCloud(eroded_cloud_, dilated_cloud_);
-        projectPointCloud(dilated_cloud_, projected_cloud_);
+        crop_box_fastlio_->filterROI(raw_cloud, roi_filtered_cloud_);
+        // erodePointCloud(roi_filtered_cloud_, eroded_cloud_);
+        // dilatePointCloud(eroded_cloud_, dilated_cloud_);
+        projectPointCloud(roi_filtered_cloud_, projected_cloud_);
 
         // 5. 发布输出话题
-        publishDownsampledCloud(msg->header);
+        // publishDownsampledCloud(msg->header);
         publishROIFilteredCloud(msg->header);
-        publishDilatedCloud(msg->header);
-        publishErodedCloud(msg->header);
+        // publishDilatedCloud(msg->header);
+        // publishErodedCloud(msg->header);
         publishProjectedCloud(msg->header);
 
         // 7. 方环检测（每5帧，使用当前帧）
         ++ring_detect_frame_counter_;
-        if (ring_detect_frame_counter_ % 5 == 0 && !downsampled_livox_cloud_->empty()) {
-            ring_extractor_.processCloud(downsampled_livox_cloud_);
+        if (ring_detect_frame_counter_ % 5 == 0 && !roi_filtered_cloud_->empty()) {
+            ring_extractor_.processCloud(roi_filtered_cloud_);
         }
 
         // 8. 柱子检测（使用当前帧）
-        if (pillar_detect_active_ && !downsampled_livox_cloud_->empty()) {
-            auto result = pillar_detect_.detect(downsampled_livox_cloud_);
+        if (pillar_detect_active_ && !roi_filtered_cloud_->empty()) {
+            auto result = pillar_detect_.detect(roi_filtered_cloud_);
             if (result.detected) {
                 std_msgs::Int32 result_msg;
                 result_msg.data = result.case_id;
@@ -751,13 +765,14 @@ class CloudAccumulator
     ros::Subscriber cloud_registered_sub_;
     ros::Subscriber fastlio_odom_sub_;
     Eigen::Matrix4f last_fastlio_pose_ = Eigen::Matrix4f::Identity();
-    bool fastlio_odom_received_ = false;
-    std::string cloud_source_ = "livox";
+    bool fastlio_odom_received_        = false;
+    std::string cloud_source_          = "livox";
     PointCloudPtrT transformed_cloud_;
     Eigen::Matrix4f T_smooth_ = Eigen::Matrix4f::Identity();
-    bool T_initialized_ = false;
+    bool T_initialized_       = false;
 
     std::unique_ptr<pcl_detection2::core::CropBoxRoi<PointT>> crop_box_;
+    std::unique_ptr<pcl_detection2::core::CropBoxRoi<PointT>> crop_box_fastlio_;
     std::unique_ptr<pcl_detection2::core::CropBoxRoi<PointT>> pre_register_crop_box_;
     std::unique_ptr<RegisterT> register_;
     std::unique_ptr<VoxelFilterT> voxel_filter_;
@@ -824,6 +839,10 @@ class CloudAccumulator
     float roi_y_max_;
     float roi_z_min_;
     float roi_z_max_;
+    // FAST-LIO 管线专用 ROI 边界（默认回退到 roi_ 对应值）
+    float fastlio_roi_x_min_, fastlio_roi_x_max_;
+    float fastlio_roi_y_min_, fastlio_roi_y_max_;
+    float fastlio_roi_z_min_, fastlio_roi_z_max_;
     // 配准前ROI独立边界（默认回退到 roi_ 对应值）
     float pre_roi_x_min_, pre_roi_x_max_;
     float pre_roi_y_min_, pre_roi_y_max_;

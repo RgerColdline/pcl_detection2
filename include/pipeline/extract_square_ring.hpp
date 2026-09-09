@@ -28,6 +28,7 @@
 #include <Eigen/Dense>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <cmath>
 #include <vector>
 #include <string>
 #include <sstream>
@@ -85,6 +86,14 @@ class ExtractSquareRing
         pnh_.param("ring_filter/y_max", ring_filter_y_max_, 0.4f);
         pnh_.param("ring_filter/z_min", ring_filter_z_min_, 0.5f);
         pnh_.param("ring_filter/z_max", ring_filter_z_max_, 2.0f);
+
+        // 环位置先验（已知环中心，XY 圆形 + Z 容差过滤）
+        pnh_.param("ring_prior/enabled", ring_prior_enabled_, false);
+        pnh_.param("ring_prior/center_x", ring_prior_center_x_, 0.0f);
+        pnh_.param("ring_prior/center_y", ring_prior_center_y_, 0.0f);
+        pnh_.param("ring_prior/center_z", ring_prior_center_z_, 0.0f);
+        pnh_.param("ring_prior/search_radius", ring_prior_radius_, 0.0f);
+        pnh_.param("ring_prior/z_tolerance", ring_prior_z_tolerance_, 0.0f);
 
         // --- ROS 通信 ---
         cloud_sub_ =
@@ -290,6 +299,28 @@ class ExtractSquareRing
                             ROS_WARN("[ExtractSquareRing] 最佳候选超出位置范围: "
                                      "center=(%.2f,%.2f,%.2f) score=%.4f",
                                      cx, cy, cz, rc.score);
+                        }
+                        continue;
+                    }
+                }
+
+                // 环位置先验：反投影中心距已知环中心超出范围即丢弃（环在场地位置固定）
+                if (ring_prior_enabled_ && ring_prior_radius_ > 0.0f) {
+                    float dx = ring_3d.center.x() - ring_prior_center_x_;
+                    float dy = ring_3d.center.y() - ring_prior_center_y_;
+                    float dz = ring_3d.center.z() - ring_prior_center_z_;
+                    bool xy_out = std::hypot(dx, dy) > ring_prior_radius_;
+                    bool z_out =
+                        ring_prior_z_tolerance_ > 0.0f && std::fabs(dz) > ring_prior_z_tolerance_;
+                    if (xy_out || z_out) {
+                        if (is_best) {
+                            ROS_WARN("[ExtractSquareRing] 最佳候选距已知环中心过远: "
+                                     "center=(%.2f,%.2f,%.2f) prior=(%.2f,%.2f,%.2f) r=%.2f "
+                                     "z_tol=%.2f",
+                                     ring_3d.center.x(), ring_3d.center.y(), ring_3d.center.z(),
+                                     ring_prior_center_x_, ring_prior_center_y_,
+                                     ring_prior_center_z_, ring_prior_radius_,
+                                     ring_prior_z_tolerance_);
                         }
                         continue;
                     }
@@ -612,6 +643,14 @@ class ExtractSquareRing
     float ring_filter_y_max_    = 0.4f;
     float ring_filter_z_min_    = 0.5f;
     float ring_filter_z_max_    = 2.0f;
+
+    // 环位置先验（已知环中心，XY 圆形 + Z 容差过滤）
+    bool ring_prior_enabled_        = false;
+    float ring_prior_center_x_      = 0.0f;
+    float ring_prior_center_y_      = 0.0f;
+    float ring_prior_center_z_      = 0.0f;
+    float ring_prior_radius_        = 0.0f;
+    float ring_prior_z_tolerance_   = 0.0f;
 
     // ---- 临时调试: 延时保存投影图 ----
     ros::Time dump_start_time_;

@@ -19,7 +19,18 @@ find_package(catkin REQUIRED COMPONENTS
   message_generation
 )
 find_package(Eigen3 REQUIRED)
-find_package(OpenCV REQUIRED)
+# find_package(OpenCV REQUIRED)
+# 明确指定 OpenCV 的 CMake 配置文件路径
+set(OpenCV_DIR "/usr/lib/aarch64-linux-gnu/cmake/opencv4")
+find_package(OpenCV 4 REQUIRED)
+
+# 检查是否找到
+if(OpenCV_FOUND)
+  message(STATUS "OpenCV found: ${OpenCV_INCLUDE_DIRS}")
+  include_directories(${OpenCV_INCLUDE_DIRS})
+else()
+  message(FATAL_ERROR "OpenCV not found, please install libopencv-dev")
+endif()
 
 ################################################
 ## Declare ROS messages, services and actions ##
@@ -70,6 +81,8 @@ target_link_libraries(${PROJECT_NAME}_node
   ${EIGEN3_LIBRARIES}
   ${OpenCV_LIBRARIES}
 )
+# 假设你的可执行目标名为 pcl_detection2_node，在最后链接时加上
+target_link_libraries(pcl_detection2_node ${OpenCV_LIBS})
 
 add_dependencies(${PROJECT_NAME}_node
   ${${PROJECT_NAME}_EXPORTED_TARGETS}

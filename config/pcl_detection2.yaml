@@ -1,10 +1,13 @@
 initial_enable: true
 
-# 点云数据源: "livox"=旧Livox管线(需ICP配准)  "fastlio"=FAST-LIO2订阅
-cloud_source: "fastlio"
+# 数据源选择：
+#   fastlio = 订阅 /fastlio_map(FAST-LIO2 累积地图) + /Odometry，camera_init 系与 odom 重合，
+#             不再自建图/ICP（仿真链路，柱子/方环/障碍物管线统一吃 fastlio 地图）
+#   livox   = 订阅 /livox/lidar + mavros 里程计自建图配准（旧链路，保留备用）
+cloud_source: fastlio
 
 debug:
-  timing_enable: true
+  timing_enable: false                # 关闭逐阶段计时打点（省每帧 WallTime + 每秒日志开销）
 
 livox_roi:
   uav_radius: 0.3
@@ -43,6 +46,17 @@ roi:
   z_min: 0.3
   z_max: 1.5
 
+# ── FAST-LIO 管线专用 ROI（cloud_source: fastlio 时使用，独立于上方 roi:）──
+# 复制自 roi: 段，参数可按需单独调整，不影响 livox 管线的 roi:
+roi_fastlio:
+  uav_radius: 0.3
+  x_min: -3.25
+  x_max: 0.55
+  y_min: -3.15
+  y_max: 0.65
+  z_min: -1.0
+  z_max: 3.0
+
 # ── 配准前ROI：在ICP配准之前先用ROI裁剪世界坐标点云，减少无关背景点干扰 ──
 # 未指定时默认沿用上方 roi: 的对应值
 pre_register_roi:
@@ -56,7 +70,7 @@ pre_register_roi:
   # z_max: 1.5
 
 dilation:
-  radius: 0.0
+  radius: 0
   steps: 12
 
 erosion:
@@ -102,32 +116,24 @@ ring_plane:
   projection_margin: 20
 
 ring_match:
-  # 模板图片路径列表 (YAML数组，顺序=优先级，高优先级先匹配)
-  # 相对路径会相对于 <pcl_detection2 包路径>/templates/ 解析
-  template_paths:
-    - "obs1.png"
-    - "obs_from_dump.png"
+  # ============ 固定尺寸方环检测（找缺口 + 固定尺寸验证，替代多尺度模板匹配）============
+  # 方案：投影二值图反相 → findContours 找黑区缺口（环孔洞）→ minAreaRect 验证
+  #       边长落在固定方环尺寸范围内 → 输出 4 角点。不做 169×N 次 matchTemplate。
+  # 目的：方环检测仅用于可视化（实际任务走定点/穿环，检测结果不参与控制），性能优先。
 
-  # 单模板路径 (当 template_paths 为空时使用)
-  template_path: ""
+  # 固定方环尺寸范围（像素）：环孔 1.1m @ 投影分辨率 0.05m/px ≈ 22px
+  # 范围放宽到 ±2 倍，覆盖透视变形与点云稀疏/形态学闭合造成的偏差
+  fixed_ring_min_px: 10
+  fixed_ring_max_px: 45
 
-  # 每个模板的独立阈值 (可选，数量和 template_paths 一致)
-  # 不设置则统一使用 match_threshold
-  template_thresholds: []
+  # 方形度：minAreaRect 长边/短边 最大比值（透视下方形会变形，放宽到 2.0）
+  max_aspect_ratio: 2.0
 
-  match_threshold: 0.35                  # 降低，允许不完美的环被检出
-  match_method: 5                        # TM_CCOEFF_NORMED
+  # 孔洞填充度：轮廓面积 / 外接矩形面积 下限（真孔洞应接近实心）
+  min_fill_ratio: 0.5
 
-  # 多尺度匹配参数 (±30%, 更宽松的尺度容差)
-  scale_x_min: 0.7
-  scale_x_max: 1.3
-  scale_x_step: 0.05
-  scale_y_min: 0.7
-  scale_y_max: 1.3
-  scale_y_step: 0.05
-
-  # NMS
-  nms_iou_threshold: 0.3
+  # 最小孔洞面积（像素²），过滤小噪点
+  min_hole_area: 80
 
   # 形态学核大小 (填充稀疏LiDAR投影的缝隙)
   # 点云噪点/偏移导致环边界有空洞，需用较大核做 CLOSE 填满
@@ -137,14 +143,25 @@ ring_match:
   # 每张投影图最大检测环数
   max_rings_per_image: 3
 
-  # 环孔洞验证：排除实墙误匹配
-  # 加大核后环可能被轻微填充，降低阈值避免误杀
-  min_hole_ratio: 0.2
-
-  # 轮廓检测 fallback
-  expected_size_min: 100
-  expected_size_max: 400
-  contour_area_ratio_min: 0.5
+  # ---- 以下为旧多尺度模板匹配参数，已弃用（仅保留便于回退，不再参与计算）----
+  # template_paths:
+  #   - "obs1.png"
+  #   - "obs_from_dump.png"
+  # template_path: ""
+  # template_thresholds: []
+  # match_threshold: 0.35
+  # match_method: 5
+  # scale_x_min: 0.7
+  # scale_x_max: 1.3
+  # scale_x_step: 0.05
+  # scale_y_min: 0.7
+  # scale_y_max: 1.3
+  # scale_y_step: 0.05
+  # nms_iou_threshold: 0.3
+  # min_hole_ratio: 0.2
+  # expected_size_min: 100
+  # expected_size_max: 400
+  # contour_area_ratio_min: 0.5
 
 # 环3D位置过滤（世界坐标系，发布前过滤掉位置不合理的环）
 ring_filter:
@@ -156,23 +173,56 @@ ring_filter:
   z_min: 0.5
   z_max: 2.0
 
-# === 柱子检测 ===
+# ── 环位置先验：环在场地位置固定（场系 x=2 处墙上的 1.1m 方孔）──
+# odom 系 = 场系绕出生点(0.65,0.75)转180°：p_odom = (0.65 - x_field, 0.75 - y_field)
+# 环孔中心场系 (2.0, 0.75) → odom (-1.35, 0.0)；穿环高度 z=1.3
+# 用途：反投影出的环中心超出范围直接丢弃（过滤误检缺口/墙缝）
+# 注意：坐标系与 pcl_detection2 世界系一致（= 启动时刻的 odom 系，与 traverse_map 同约定），
+#       出生点或环位变了要同步改
+ring_prior:
+  enabled: true
+  center_x: -1.35      # 环中心 X (odom 系, m)
+  center_y: 0.0        # 环中心 Y (odom 系, m)
+  center_z: 1.3        # 环中心 Z (odom 系, m)
+  search_radius: 0.2   # XY 半径 (m)；0 或负 = 不启用 XY 距离过滤
+  z_tolerance: 0.3     # Z 容差 (m)；0 或负 = 不启用 Z 过滤
+
+# === 柱子检测（坐标判定为主，模板匹配兜底，2026-08 重构）===
+# 【case 命名规则（全队统一，与 raicom_vision_laser/config/traverse_map.yaml、
+#   main_control 的 TRAV_CASE_PILLARS 一致，勿单独改）】
+#   候选索引: 0=A左(2.7,1.55) 1=A右(3.3,1.55) 2=B左(2.7,2.8) 3=B右(3.3,2.8)（括号为场系坐标）
+#   case0 = A左+B左（两柱都在 x=2.7）
+#   case1 = A左+B右
+#   case2 = A右+B左
+#   case3 = A右+B右（两柱都在 x=3.3）
+# 检测输出 /pcl_detection2/pillar_case_id 即此编号，直接当穿越 case 用。
 pillar_detect_enabled: true
 
+# ---- 坐标判定（主）：数 4 个候选柱位半径内 ROI 点数，A/B 侧各出 1 根拼 case ----
+pillar_coord:
+  radius: 0.3          # 柱位判定半径 (m)
+  min_points: 5         # 半径内点数 >= 此值判"有柱"（仿真点云干净先取灵敏值，真机再调）
+  confirm_frames: 3     # 连续 N 帧组合一致才发布（防单帧噪声误判）
+  ambiguous_ratio: 0.8  # 同侧两候选都过阈值且点数比 >= 此值 -> 歧义，回退模板匹配
+
+# ---- 模板匹配（兜底）：仅坐标判定歧义时使用 ----
+# 注意：改动下方 pillar_roi/resolution 后必须重跑 tools/make_pillar_templates.py！
 pillar_roi:
   x_min: -3.5
   x_max: -1.2
   y_min: -3.15
   y_max: 0.5
-  z_min: 0.3
-  z_max: 1.5
+  z_min: -1.0
+  z_max: 2.5
   resolution: 0.05
-  match_threshold: 0.5
+  match_threshold: 0.5    # 兜底判定阈值（合成分 = 模板分×(1+权重×密度分)）
   proj_upscale: 1         # 投影图放大倍数 (大于tpl以给matchTemplate留滑动空间)
-  tpl_upscale: 1           # 模板放大倍数
+  tpl_upscale: 1          # 模板放大倍数
+  density_weight: 0.3     # 兜底合成分中密度分权重 (0~1)
 
+# 4 个候选柱位（odom 系，= 场系绕出生点(0.65,0.75)转180°；坐标判定与模板共用）
 pillar_pos:
-  p1_pos1: [-2.05, -0.80]
-  p1_pos2: [-2.65, -0.80]
-  p2_pos1: [-2.05, -2.05]
-  p2_pos2: [-2.65, -2.05]
+  p1_pos1: [-2.05, -0.80]   # A左 = 场系 (2.7,1.55)
+  p1_pos2: [-2.65, -0.80]   # A右 = 场系 (3.3,1.55)
+  p2_pos1: [-2.05, -2.05]   # B左 = 场系 (2.7,2.8)
+  p2_pos2: [-2.65, -2.05]   # B右 = 场系 (3.3,2.8)
