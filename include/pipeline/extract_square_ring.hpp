@@ -42,7 +42,7 @@ namespace pipeline
  * @brief 方环提取编排类
  *
  * 整合 PlaneExtract → PlaneProject → SquareRingMatch → PointBackProject 全流程，
- * 订阅点云话题，发布 SquareRing 消息和 rviz 可视化标记。
+ * 接收点云，发布 SquareRing 消息和 Foxglove/RViz 可视化标记。
  *
  * 修复：每个检测到的方环独立发布一条 SquareRing 消息，
  *       一条 MarkerArray 汇总所有环的可视化。
@@ -77,6 +77,10 @@ class ExtractSquareRing
         pnh_.param("ring_pipeline/max_planes", max_planes_, 2);
         pnh_.param("ring_pipeline/ring_half_thickness", ring_half_thickness_, 0.25f);
         pnh_.param("ring_pipeline/dump_enabled", dump_enabled_, false);
+        pnh_.param("ring_pipeline/use_topic_input", use_topic_input_, false);
+        pnh_.param("visualization/frame_id", visualization_frame_, std::string("world"));
+        pnh_.param("visualization/ring_width", prior_ring_width_, 1.1f);
+        pnh_.param("visualization/ring_height", prior_ring_height_, 1.1f);
 
         // 环3D位置过滤器参数
         pnh_.param("ring_filter/enabled", ring_filter_enabled_, false);
@@ -96,12 +100,14 @@ class ExtractSquareRing
         pnh_.param("ring_prior/z_tolerance", ring_prior_z_tolerance_, 0.0f);
 
         // --- ROS 通信 ---
-        cloud_sub_ =
-            nh_.subscribe(input_cloud_topic_, 1, &ExtractSquareRing::cloudCallback, this);
+        if (use_topic_input_) {
+            cloud_sub_ =
+                nh_.subscribe(input_cloud_topic_, 1, &ExtractSquareRing::cloudCallback, this);
+        }
 
         ring_pub_ = nh_.advertise<pcl_detection2::SquareRing>("/pcl_detection2/square_ring", 10);
         marker_pub_ = nh_.advertise<visualization_msgs::MarkerArray>(
-            "/pcl_detection2/ring_markers", 5);
+            "/pcl_detection2/ring_markers", 1, true);
 
         if (publish_debug_cloud_) {
             plane_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
@@ -111,7 +117,11 @@ class ExtractSquareRing
         tf_buffer_   = std::make_shared<tf2_ros::Buffer>();
         tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
-        ROS_DEBUG("[ExtractSquareRing] 初始化完成，订阅: %s", input_cloud_topic_.c_str());
+        // 固定先验环立即发布且保持 latched，Foxglove 后连接也能看到定点目标。
+        publishBaseMarkers(ros::Time::now());
+
+        ROS_DEBUG("[ExtractSquareRing] 初始化完成，输入方式: %s",
+                  use_topic_input_ ? input_cloud_topic_.c_str() : "同进程直传");
     }
 
     /**
@@ -119,6 +129,7 @@ class ExtractSquareRing
      * @param cloud 输入点云 (已变换到世界坐标系)
      */
     void processCloud(const ConstPtr &cloud) {
+        if (!enabled_) return;
         process(cloud);
     }
 
@@ -143,12 +154,13 @@ class ExtractSquareRing
         // 构建 header
         std_msgs::Header header;
         header.stamp    = ros::Time::now();
-        header.frame_id = "map";
+        header.frame_id = visualization_frame_;
 
         // ---- Step 1: 平面提取 ----
         auto planes = plane_extract_.extract(cloud);
         if (planes.empty()) {
             ROS_DEBUG_THROTTLE(2, "[ExtractSquareRing] 未检测到平面");
+            publishBaseMarkers(header.stamp);
             return;
         }
 
@@ -223,7 +235,7 @@ class ExtractSquareRing
                 sensor_msgs::PointCloud2 debug_cloud;
                 pcl::toROSMsg(*plane.cloud, debug_cloud);
                 debug_cloud.header = header;
-                debug_cloud.header.frame_id = "map";
+                debug_cloud.header.frame_id = visualization_frame_;
                 plane_cloud_pub_.publish(debug_cloud);
             }
 
@@ -248,7 +260,7 @@ class ExtractSquareRing
             }
         }
 
-        // 最佳候选 → SquareRing 消息; 全部候选 → rviz markers (最佳=金色高亮)
+        // 最佳候选 → SquareRing 消息; 全部候选 → 可视化 markers (最佳=金色高亮)
         ROS_DEBUG("[ExtractSquareRing] 收集完成: %zu 个候选 (跨 %d 个平面)",
                  candidates.size(), plane_idx);
 
@@ -268,12 +280,20 @@ class ExtractSquareRing
             }
 
             visualization_msgs::MarkerArray all_markers;
+            addDeleteAllMarker(all_markers, header.stamp);
+            addPriorRingMarker(all_markers, header.stamp);
             int marker_id = 0;
             bool best_published = false;
+            float published_score = 0.0f;
+            float published_width = 0.0f;
+            float published_height = 0.0f;
+            Eigen::Vector3f published_center = Eigen::Vector3f::Zero();
 
             for (size_t i = 0; i < candidates.size(); ++i) {
                 const auto &rc = candidates[i];
-                bool is_best = (i == 0);
+                // 得分最高且通过全部 3D 过滤的候选才是最佳候选。
+                // 原实现固定 i==0；若第一名被位置先验过滤，后续合法候选永远无法发布。
+                bool is_best = !best_published;
 
                 auto ring_3d = point_back_project_.computeRingPoints(
                     rc.match.corners, rc.proj, rc.plane, drone_pos);
@@ -358,28 +378,28 @@ class ExtractSquareRing
 
                     ring_pub_.publish(ring_msg);
                     best_published = true;
+                    published_score = rc.score;
+                    published_width = w;
+                    published_height = h;
+                    published_center = ring_3d.center;
                 }
             }
 
-            // 发布所有 rviz markers
+            // 发布所有可视化 markers
             marker_pub_.publish(all_markers);
 
             if (best_published) {
-                const auto &best = candidates[0];
-                auto best_3d = point_back_project_.computeRingPoints(
-                    best.match.corners, best.proj, best.plane, drone_pos);
-                float w = (best_3d.corners[0] - best_3d.corners[1]).norm();
-                float h = (best_3d.corners[1] - best_3d.corners[2]).norm();
                 ROS_DEBUG("[ExtractSquareRing] >>> 发布: score=%.4f size=%.2fx%.2f m "
                          "center=(%.2f,%.2f,%.2f) markers=%zu (共 %zu 候选)",
-                         best.score, w, h,
-                         best_3d.center.x(), best_3d.center.y(), best_3d.center.z(),
+                         published_score, published_width, published_height,
+                         published_center.x(), published_center.y(), published_center.z(),
                          all_markers.markers.size(), candidates.size());
             } else {
                 ROS_WARN("[ExtractSquareRing] 最佳候选发布失败");
             }
         } else {
             ROS_DEBUG("[ExtractSquareRing] 无候选，未发布方环");
+            publishBaseMarkers(header.stamp);
         }
     }
 
@@ -390,7 +410,8 @@ class ExtractSquareRing
         Eigen::Vector3f pos(0, 0, 0);
         try {
             geometry_msgs::TransformStamped tf =
-                tf_buffer_->lookupTransform("map", "base_link", stamp, ros::Duration(0.1));
+                tf_buffer_->lookupTransform(visualization_frame_, "base_link", stamp,
+                                            ros::Duration(0.0));
             pos.x() = tf.transform.translation.x;
             pos.y() = tf.transform.translation.y;
             pos.z() = tf.transform.translation.z;
@@ -491,8 +512,77 @@ class ExtractSquareRing
         ++dump_plane_idx_;
     }
 
+    void addDeleteAllMarker(visualization_msgs::MarkerArray &array,
+                            const ros::Time &stamp) const {
+        visualization_msgs::Marker marker;
+        marker.header.frame_id = visualization_frame_;
+        marker.header.stamp    = stamp;
+        marker.action          = visualization_msgs::Marker::DELETEALL;
+        array.markers.push_back(marker);
+    }
+
     /**
-     * @brief 为 rviz 创建方环可视化标记
+     * @brief 添加固定先验环；环所在墙面为 x 常量，因此线框位于 YZ 平面
+     */
+    void addPriorRingMarker(visualization_msgs::MarkerArray &array,
+                            const ros::Time &stamp) const {
+        if (!ring_prior_enabled_) return;
+
+        visualization_msgs::Marker marker;
+        marker.header.frame_id = visualization_frame_;
+        marker.header.stamp    = stamp;
+        marker.ns              = "ring_prior";
+        marker.id              = 0;
+        marker.type            = visualization_msgs::Marker::LINE_STRIP;
+        marker.action          = visualization_msgs::Marker::ADD;
+        marker.pose.orientation.w = 1.0;
+        marker.scale.x         = 0.04;
+        marker.color.r         = 0.0f;
+        marker.color.g         = 0.75f;
+        marker.color.b         = 1.0f;
+        marker.color.a         = 0.9f;
+
+        const double half_w = prior_ring_width_ * 0.5;
+        const double half_h = prior_ring_height_ * 0.5;
+        const double ys[5] = {-half_w, half_w, half_w, -half_w, -half_w};
+        const double zs[5] = { half_h, half_h, -half_h, -half_h,  half_h};
+        for (int i = 0; i < 5; ++i) {
+            geometry_msgs::Point point;
+            point.x = ring_prior_center_x_;
+            point.y = ring_prior_center_y_ + ys[i];
+            point.z = ring_prior_center_z_ + zs[i];
+            marker.points.push_back(point);
+        }
+        array.markers.push_back(marker);
+
+        visualization_msgs::Marker label;
+        label.header          = marker.header;
+        label.ns              = "ring_prior";
+        label.id              = 1;
+        label.type            = visualization_msgs::Marker::TEXT_VIEW_FACING;
+        label.action          = visualization_msgs::Marker::ADD;
+        label.pose.orientation.w = 1.0;
+        label.pose.position.x = ring_prior_center_x_;
+        label.pose.position.y = ring_prior_center_y_;
+        label.pose.position.z = ring_prior_center_z_ + half_h + 0.15;
+        label.scale.z         = 0.16;
+        label.color.r         = 0.0f;
+        label.color.g         = 0.75f;
+        label.color.b         = 1.0f;
+        label.color.a         = 1.0f;
+        label.text            = "fixed ring prior";
+        array.markers.push_back(label);
+    }
+
+    void publishBaseMarkers(const ros::Time &stamp) {
+        visualization_msgs::MarkerArray markers;
+        addDeleteAllMarker(markers, stamp);
+        addPriorRingMarker(markers, stamp);
+        marker_pub_.publish(markers);
+    }
+
+    /**
+     * @brief 为 Foxglove/RViz 创建方环可视化标记
      * @param is_best 是否为最佳候选 (金色高亮 vs 半透明绿)
      */
     void addRingMarkers(visualization_msgs::MarkerArray &array,
@@ -512,12 +602,13 @@ class ExtractSquareRing
         // ---- 方环线框 ----
         {
             visualization_msgs::Marker marker;
-            marker.header.frame_id = "map";
+            marker.header.frame_id = visualization_frame_;
             marker.header.stamp    = stamp;
             marker.ns              = ns;
             marker.id              = ring_id;
             marker.type            = visualization_msgs::Marker::LINE_STRIP;
             marker.action          = visualization_msgs::Marker::ADD;
+            marker.pose.orientation.w = 1.0;
             marker.scale.x         = line_w;
             marker.color.r         = cr;
             marker.color.g         = cg;
@@ -538,12 +629,13 @@ class ExtractSquareRing
         // ---- 中心点 (最佳=红色大球, 其他=小绿球) ----
         {
             visualization_msgs::Marker marker;
-            marker.header.frame_id = "map";
+            marker.header.frame_id = visualization_frame_;
             marker.header.stamp    = stamp;
             marker.ns              = ns;
             marker.id              = ring_id + 1;
             marker.type            = visualization_msgs::Marker::SPHERE;
             marker.action          = visualization_msgs::Marker::ADD;
+            marker.pose.orientation.w = 1.0;
             float s = is_best ? 0.12f : 0.06f;
             marker.scale.x = marker.scale.y = marker.scale.z = s;
             marker.color.r = is_best ? 1.0f : 0.0f;
@@ -562,12 +654,13 @@ class ExtractSquareRing
         // ---- 前方点 (金色箭头) ----
         {
             visualization_msgs::Marker marker;
-            marker.header.frame_id = "map";
+            marker.header.frame_id = visualization_frame_;
             marker.header.stamp    = stamp;
             marker.ns              = ns;
             marker.id              = ring_id + 2;
             marker.type            = visualization_msgs::Marker::ARROW;
             marker.action          = visualization_msgs::Marker::ADD;
+            marker.pose.orientation.w = 1.0;
             marker.scale.x         = 0.06;
             marker.scale.y         = 0.12;
             marker.scale.z         = 0.12;
@@ -587,12 +680,13 @@ class ExtractSquareRing
         // ---- 后方点 (蓝色箭头) ----
         {
             visualization_msgs::Marker marker;
-            marker.header.frame_id = "map";
+            marker.header.frame_id = visualization_frame_;
             marker.header.stamp    = stamp;
             marker.ns              = ns;
             marker.id              = ring_id + 3;
             marker.type            = visualization_msgs::Marker::ARROW;
             marker.action          = visualization_msgs::Marker::ADD;
+            marker.pose.orientation.w = 1.0;
             marker.scale.x         = 0.06;
             marker.scale.y         = 0.12;
             marker.scale.z         = 0.12;
@@ -631,6 +725,8 @@ class ExtractSquareRing
     // 参数
     bool enabled_               = true;
     std::string input_cloud_topic_;
+    bool use_topic_input_       = false;
+    std::string visualization_frame_ = "world";
     bool publish_debug_cloud_   = true;
     int max_planes_             = 2;
     float ring_half_thickness_  = 0.25f;
@@ -651,6 +747,8 @@ class ExtractSquareRing
     float ring_prior_center_z_      = 0.0f;
     float ring_prior_radius_        = 0.0f;
     float ring_prior_z_tolerance_   = 0.0f;
+    float prior_ring_width_         = 1.1f;
+    float prior_ring_height_        = 1.1f;
 
     // ---- 临时调试: 延时保存投影图 ----
     ros::Time dump_start_time_;

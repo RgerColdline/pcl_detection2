@@ -154,8 +154,10 @@ class SquareRingMatch
         cv::bitwise_not(image, inverted);
 
         // ---- Step 2: 找所有白色连通域（即原图的黑色区域）----
+        // RETR_EXTERNAL 只返回最外层背景轮廓；方环孔洞被环边界包围，属于嵌套轮廓，
+        // 会被直接漏掉。RETR_LIST 同时返回内外轮廓，后续边界/尺寸过滤负责排除背景。
         std::vector<std::vector<cv::Point>> contours;
-        cv::findContours(inverted, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+        cv::findContours(inverted, contours, cv::RETR_LIST, cv::CHAIN_APPROX_SIMPLE);
 
         const int border_margin = 2;
 

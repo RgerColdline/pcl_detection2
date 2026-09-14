@@ -9,6 +9,16 @@ cloud_source: fastlio
 debug:
   timing_enable: false                # 关闭逐阶段计时打点（省每帧 WallTime + 每秒日志开销）
 
+# Foxglove 3D 可视化。PCL 坐标数值与 PX4 local/world 约定一致，统一声明为 world，
+# 避免 Marker 写成 map 后因缺少 map->world TF 而无法显示。
+visualization:
+  frame_id: "world"
+  ring_width: 1.1
+  ring_height: 1.1
+  pillar_radius: 0.10
+  pillar_height: 1.50
+  pillar_base_z: 0.0
+
 livox_roi:
   uav_radius: 0.3
   max_coord: 20.0
@@ -84,7 +94,8 @@ projection:
 ring_pipeline:
   enabled: true
   input_cloud_topic: "/pcl_detection2/downsampled_accumulated_cloud"
-  publish_debug_cloud: true
+  use_topic_input: false       # main.cpp 已同进程直传，避免 livox 模式重复订阅、重复检测
+  publish_debug_cloud: false   # 飞行时关闭平面调试点云，减少 CPU 与 Foxglove 带宽
   max_planes: 2
   dump_enabled: false          # 调试用：启动15s后每5s保存投影图到temp/
 
@@ -204,6 +215,9 @@ pillar_coord:
   min_points: 5         # 半径内点数 >= 此值判"有柱"（仿真点云干净先取灵敏值，真机再调）
   confirm_frames: 3     # 连续 N 帧组合一致才发布（防单帧噪声误判）
   ambiguous_ratio: 0.8  # 同侧两候选都过阈值且点数比 >= 此值 -> 歧义，回退模板匹配
+
+pillar_debug:
+  dump_enabled: false    # 调参时再开；关闭 PNG/PCD 磁盘写入，避免飞行时 I/O 抖动
 
 # ---- 模板匹配（兜底）：仅坐标判定歧义时使用 ----
 # 注意：改动下方 pillar_roi/resolution 后必须重跑 tools/make_pillar_templates.py！

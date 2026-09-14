@@ -19,7 +19,10 @@
 #include <sensor_msgs/PointCloud2.h>
 #include <std_msgs/Empty.h>
 #include <std_msgs/Int32.h>
+#include <visualization_msgs/Marker.h>
+#include <visualization_msgs/MarkerArray.h>
 
+#include <array>
 #include <cmath>
 #include <deque>
 #include <sstream>
@@ -229,8 +232,12 @@ class CloudAccumulator
             pillar_detect_.init(pnh_);
             pillar_result_pub_ =
                 nh_.advertise<std_msgs::Int32>("/pcl_detection2/pillar_case_id", 1);
+            pillar_marker_pub_ = nh_.advertise<visualization_msgs::MarkerArray>(
+                "/pcl_detection2/pillar_markers", 1, true);
             pillar_start_sub_ = nh_.subscribe("/pcl_detection2/start_pillar_detect", 1,
                                               &CloudAccumulator::pillarStartCallback, this);
+            initPillarVisualization();
+            publishPillarMarkers(-1);
         }
     }
 
@@ -404,6 +411,7 @@ class CloudAccumulator
                 std_msgs::Int32 msg;
                 msg.data = result.case_id;
                 pillar_result_pub_.publish(msg);
+                publishPillarMarkers(result.case_id);
                 pillar_detect_active_ = false;  // 匹配到自动停止
                 ROS_INFO("[Pillar] 检测完成 case=%d, 自动停止匹配", result.case_id);
             }
@@ -673,7 +681,86 @@ class CloudAccumulator
     void pillarStartCallback(const std_msgs::Empty::ConstPtr &) {
         pillar_detect_.reset();  // 清零连续确认状态，重新开始逐帧判定
         pillar_detect_active_ = true;
+        publishPillarMarkers(-1);
         ROS_INFO("[Pillar] 收到启动信号，开始逐帧坐标判定（模板兜底）");
+    }
+
+    void initPillarVisualization() {
+        pnh_.param("visualization/frame_id", visualization_frame_, std::string("world"));
+        pnh_.param("visualization/pillar_radius", pillar_marker_radius_, 0.10);
+        pnh_.param("visualization/pillar_height", pillar_marker_height_, 1.50);
+        pnh_.param("visualization/pillar_base_z", pillar_marker_base_z_, 0.0);
+
+        static const char *keys[4] = {"p1_pos1", "p1_pos2", "p2_pos1", "p2_pos2"};
+        static const double defaults[4][2] = {
+            {-2.05, -0.80}, {-2.65, -0.80}, {-2.05, -2.05}, {-2.65, -2.05}};
+        for (int i = 0; i < 4; ++i) {
+            std::vector<double> value;
+            if (pnh_.getParam(std::string("pillar_pos/") + keys[i], value) && value.size() >= 2) {
+                pillar_marker_positions_[i] = Eigen::Vector2f(value[0], value[1]);
+            }
+            else {
+                pillar_marker_positions_[i] = Eigen::Vector2f(defaults[i][0], defaults[i][1]);
+            }
+        }
+    }
+
+    // case_id=-1：显示四个固定候选位；0~3：高亮本局确认的两根柱子。
+    // 仅在初始化、触发检测和检测完成时调用，不占用点云帧循环。
+    void publishPillarMarkers(int case_id) {
+        if (pillar_marker_pub_.getTopic().empty()) return;
+
+        static const int case_pillars[4][2] = {{0, 2}, {0, 3}, {1, 2}, {1, 3}};
+        static const char *labels[4] = {"A-left", "A-right", "B-left", "B-right"};
+        visualization_msgs::MarkerArray markers;
+
+        visualization_msgs::Marker clear;
+        clear.header.frame_id = visualization_frame_;
+        clear.header.stamp    = ros::Time::now();
+        clear.action          = visualization_msgs::Marker::DELETEALL;
+        markers.markers.push_back(clear);
+
+        for (int i = 0; i < 4; ++i) {
+            const bool selected = case_id >= 0 && case_id < 4 &&
+                                  (case_pillars[case_id][0] == i || case_pillars[case_id][1] == i);
+
+            visualization_msgs::Marker cylinder;
+            cylinder.header.frame_id = visualization_frame_;
+            cylinder.header.stamp    = clear.header.stamp;
+            cylinder.ns              = "pillar_candidates";
+            cylinder.id              = i;
+            cylinder.type            = visualization_msgs::Marker::CYLINDER;
+            cylinder.action          = visualization_msgs::Marker::ADD;
+            cylinder.pose.orientation.w = 1.0;
+            cylinder.pose.position.x = pillar_marker_positions_[i].x();
+            cylinder.pose.position.y = pillar_marker_positions_[i].y();
+            cylinder.pose.position.z = pillar_marker_base_z_ + pillar_marker_height_ * 0.5;
+            cylinder.scale.x = cylinder.scale.y = pillar_marker_radius_ * 2.0;
+            cylinder.scale.z = pillar_marker_height_;
+            cylinder.color.r = selected ? 1.0f : 0.25f;
+            cylinder.color.g = selected ? 0.45f : 0.65f;
+            cylinder.color.b = selected ? 0.0f : 1.0f;
+            cylinder.color.a = selected ? 0.95f : 0.20f;
+            markers.markers.push_back(cylinder);
+
+            visualization_msgs::Marker text;
+            text.header          = cylinder.header;
+            text.ns              = "pillar_labels";
+            text.id              = i;
+            text.type            = visualization_msgs::Marker::TEXT_VIEW_FACING;
+            text.action          = visualization_msgs::Marker::ADD;
+            text.pose.orientation.w = 1.0;
+            text.pose.position.x = cylinder.pose.position.x;
+            text.pose.position.y = cylinder.pose.position.y;
+            text.pose.position.z = pillar_marker_base_z_ + pillar_marker_height_ + 0.15;
+            text.scale.z         = 0.16;
+            text.color.r = text.color.g = text.color.b = 1.0f;
+            text.color.a         = selected ? 1.0f : 0.55f;
+            text.text            = labels[i];
+            markers.markers.push_back(text);
+        }
+
+        pillar_marker_pub_.publish(markers);
     }
 
     // ============================================================
@@ -737,6 +824,7 @@ class CloudAccumulator
                 std_msgs::Int32 result_msg;
                 result_msg.data = result.case_id;
                 pillar_result_pub_.publish(result_msg);
+                publishPillarMarkers(result.case_id);
                 pillar_detect_active_ = false;
                 ROS_INFO("[Pillar] FAST-LIO 检测完成 case=%d", result.case_id);
             }
@@ -781,9 +869,15 @@ class CloudAccumulator
 
     // 柱子检测结果发布 + 启动订阅
     ros::Publisher pillar_result_pub_;
+    ros::Publisher pillar_marker_pub_;
     ros::Subscriber pillar_start_sub_;
     bool pillar_detect_active_       = false;
     int pillar_detect_frame_counter_ = 0;
+    std::string visualization_frame_ = "world";
+    std::array<Eigen::Vector2f, 4> pillar_marker_positions_;
+    double pillar_marker_radius_ = 0.10;
+    double pillar_marker_height_ = 1.50;
+    double pillar_marker_base_z_ = 0.0;
 
     PointCloudPtrT raw_livox_cloud_;
     PointCloudPtrT downsampled_livox_cloud_;

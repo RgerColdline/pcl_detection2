@@ -12,7 +12,7 @@
 //   - 输入：main.cpp 收到 /pcl_detection2/start_pillar_detect 后逐帧喂入
 //     (cloud_source=fastlio 时为 /fastlio_map 降采样点云，camera_init 与 odom 重合)
 //   - 输出：detect() 返回 detected=true 时 main.cpp 发布
-//     /pcl_detection2/pillar_case_id (Int32) 并自动停止匹配
+//     /pcl_detection2/pillar_case_id (Int32) 和柱子 MarkerArray，并自动停止匹配
 // case 命名规则（与 raicom_vision_laser/config/traverse_map.yaml、main_control
 // 的 TRAV_CASE_PILLARS 一致，全队统一勿单独改）：
 //   候选索引: 0=A左 1=A右 2=B左 3=B右（场系坐标见 config/pcl_detection2.yaml）
@@ -96,6 +96,7 @@ class PillarDetect
         pnh.param("pillar_coord/min_points", coord_min_points_, 5);
         pnh.param("pillar_coord/confirm_frames", confirm_frames_, 3);
         pnh.param("pillar_coord/ambiguous_ratio", ambiguous_ratio_, 0.8f);
+        pnh.param("pillar_debug/dump_enabled", dump_enabled_, false);
 
         // 计算投影图尺寸（+0.5f 防浮点截断，如 2.3/0.05=45.999->46）
         img_cols_ = std::max(1, static_cast<int>((roi_x_max_ - roi_x_min_) / resolution_ + 0.5f));
@@ -158,15 +159,19 @@ class PillarDetect
         int counts[4] = {0, 0, 0, 0};
         countNearPillars(*roi_cloud, counts);
 
-        // ---- Step 3: Z 平面投影二值图（模板兜底 + dump 用）----
-        cv::Mat proj_img = projectToImage(*roi_cloud);
-        cv::Mat kernel   = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
-        cv::dilate(proj_img, proj_img, kernel);
-
-        // ---- Step 4: 坐标判定，A/B 侧各出 1 根 ----
+        // ---- Step 3: 坐标判定，A/B 侧各出 1 根 ----
         int a_idx = -1, b_idx = -1;
         bool ambiguous = false;
         int frame_case = decideByCoord(counts, a_idx, b_idx, ambiguous);
+
+        // ---- Step 4: 仅坐标歧义或显式 dump 时生成投影图 ----
+        // 正常坐标判定不需要 OpenCV 投影/膨胀，避免每帧做无用计算。
+        cv::Mat proj_img;
+        if (ambiguous || dump_enabled_) {
+            proj_img = projectToImage(*roi_cloud);
+            cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
+            cv::dilate(proj_img, proj_img, kernel);
+        }
 
         // ---- Step 5: 坐标歧义 -> 模板兜底裁定 ----
         float tpl_score  = 0.0f;
@@ -214,8 +219,10 @@ class PillarDetect
                      result.by_template ? "模板兜底" : "坐标判定", result.score);
         }
 
-        // ---- dump 投影图/点云到 temp（前 3 个窗口，调参用）----
-        dumpProjection(proj_img, *roi_cloud, *cloud, frame_case, counts);
+        // ---- dump 投影图/点云到 temp（显式启用后前 3 个窗口，调参用）----
+        if (dump_enabled_) {
+            dumpProjection(proj_img, *roi_cloud, *cloud, frame_case, counts);
+        }
 
         return result;
     }
@@ -418,6 +425,7 @@ class PillarDetect
     int coord_min_points_  = 5;      // 半径内点数 >= 此值判"有柱"
     int confirm_frames_    = 3;      // 连续一致帧数
     float ambiguous_ratio_ = 0.8f;   // 同侧点数比 >= 此值 -> 歧义走模板
+    bool dump_enabled_      = false;  // 默认关闭磁盘 dump，避免飞行时 I/O 抖动
 
     int img_cols_ = 0, img_rows_ = 0;  // 投影图尺寸（init 由 ROI/resolution 算出）
     std::vector<cv::Mat> templates_;   // 兜底模板 pillar_case_00~03.png
