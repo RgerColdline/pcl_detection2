@@ -9,10 +9,10 @@ cloud_source: fastlio
 debug:
   timing_enable: false                # 关闭逐阶段计时打点（省每帧 WallTime + 每秒日志开销）
 
-# Foxglove 3D 可视化。PCL 坐标数值与 PX4 local/world 约定一致，统一声明为 world，
-# 避免 Marker 写成 map 后因缺少 map->world TF 而无法显示。
+# Foxglove 3D 可视化。FAST-LIO /fastlio_map 原生在 camera_init 系，
+# Marker 与点云使用同一坐标系，避免误标为 map/world 后依赖额外 TF。
 visualization:
-  frame_id: "world"
+  frame_id: "camera_init"
   ring_width: 1.1
   ring_height: 1.1
   pillar_radius: 0.10
